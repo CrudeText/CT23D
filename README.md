@@ -42,6 +42,8 @@ The project is designed to be:
 
 ## Project Structure
 
+## Project Structure
+
 CT23D/
 ├── pyproject.toml
 ├── README.md
@@ -75,6 +77,7 @@ CT23D/
         └── cli/
             ├── preprocess_cli.py
             └── mesh_cli.py
+
 
 ---
 
