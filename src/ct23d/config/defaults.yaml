@@ -1,0 +1,34 @@
+# Default CT23D project configuration
+
+name: "CT23D Default Project"
+
+preprocess:
+  # Paths are interpreted as relative to this YAML file location.
+  # Keep them null by default; CLI/GUI will fill them.
+  input_dir: null
+  processed_dir: null
+
+  use_cache: true
+  grayscale_tolerance: 1
+  saturation_threshold: 0.08
+  remove_bed: true
+
+meshing:
+  spacing: [1.6, 1.0, 1.0]       # (z, y, x) in mm
+  non_black_threshold: 15
+  min_component_size: 500
+  smoothing_sigma: 1.0
+
+  n_bins: 6
+  min_intensity: 1
+  max_intensity: 255
+  use_custom_bins: false
+
+  output_dir: null
+  output_prefix: "ct_layer"
+
+  adaptive_component_filtering: true
+  skip_empty_bins: true
+
+# No custom bins by default; use uniform bins from meshing.*.
+bins: []

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ct23d"
+version = "0.1.0"
+description = "Convert CT slices to 3D meshes with preprocessing and GUI tools."
+authors = [{ name = "William Arranz" }]
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "imageio",
+    "trimesh",
+    "PySide6",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "mypy",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

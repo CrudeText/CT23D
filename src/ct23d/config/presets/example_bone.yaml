@@ -1,0 +1,36 @@
+# Example preset focusing on high-intensity (bone-like) structures.
+
+name: "CT23D Bone Preset"
+
+meshing:
+  # Narrow intensity range to higher values
+  min_intensity: 150
+  max_intensity: 255
+
+  # Use explicit custom bins for more control
+  use_custom_bins: true
+
+  # Keep other fields at defaults (spacing, etc.) unless overridden elsewhere
+  n_bins: 3
+
+bins:
+  - index: 0
+    low: 150
+    high: 190
+    name: "trabecular_bone"
+    color: [0.8, 0.8, 0.9]
+    enabled: true
+
+  - index: 1
+    low: 190
+    high: 220
+    name: "cortical_bone"
+    color: [0.9, 0.9, 0.9]
+    enabled: true
+
+  - index: 2
+    low: 220
+    high: 256
+    name: "dense_bone"
+    color: [1.0, 1.0, 1.0]
+    enabled: true

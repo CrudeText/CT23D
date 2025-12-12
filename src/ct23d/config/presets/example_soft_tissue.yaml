@@ -1,0 +1,38 @@
+# Example preset focusing on mid-intensity (soft tissue-like) structures.
+
+name: "CT23D Soft Tissue Preset"
+
+meshing:
+  min_intensity: 20
+  max_intensity: 200
+  use_custom_bins: true
+  n_bins: 4
+
+bins:
+  - index: 0
+    low: 20
+    high: 70
+    name: "low_soft_tissue"
+    color: [0.7, 0.8, 0.9]
+    enabled: true
+
+  - index: 1
+    low: 70
+    high: 120
+    name: "mid_soft_tissue"
+    color: [0.6, 0.7, 0.9]
+    enabled: true
+
+  - index: 2
+    low: 120
+    high: 160
+    name: "high_soft_tissue"
+    color: [0.5, 0.6, 0.8]
+    enabled: true
+
+  - index: 3
+    low: 160
+    high: 200
+    name: "very_high_soft_tissue"
+    color: [0.4, 0.5, 0.7]
+    enabled: true
