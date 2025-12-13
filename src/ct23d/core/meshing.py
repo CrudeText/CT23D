@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, binary_closing, binary_opening
@@ -225,9 +225,10 @@ def save_mesh_ply(
     vertices: np.ndarray,
     faces: np.ndarray,
     colors: Optional[np.ndarray] = None,
+    opacity: Optional[float] = None,
 ) -> None:
     """
-    Save a mesh as an ASCII PLY file with optional per-vertex RGB colors.
+    Save a mesh as an ASCII PLY file with optional per-vertex RGB colors and opacity.
 
     Parameters
     ----------
@@ -240,6 +241,9 @@ def save_mesh_ply(
     colors:
         Optional array [N, 3] of uint8 RGB colors.
         If None, colors are omitted from the PLY.
+    opacity:
+        Optional opacity value (0.0 to 1.0) applied to all vertices.
+        If provided, an alpha channel is added to the PLY file.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,12 +252,19 @@ def save_mesh_ply(
     n_faces = faces.shape[0]
 
     has_colors = colors is not None
+    has_opacity = opacity is not None
+    
     if has_colors:
         if colors.shape != (n_verts, 3):
             raise ValueError(
                 f"colors must have shape (N, 3) matching vertices, "
                 f"got {colors.shape} for {n_verts} vertices."
             )
+    
+    if opacity is not None:
+        if not (0.0 <= opacity <= 1.0):
+            raise ValueError(f"opacity must be between 0.0 and 1.0, got {opacity}")
+        alpha_value = int(opacity * 255)
 
     with path.open("w", encoding="utf-8") as f:
         # Header
@@ -267,14 +278,22 @@ def save_mesh_ply(
             f.write("property uchar red\n")
             f.write("property uchar green\n")
             f.write("property uchar blue\n")
+        if has_opacity:
+            f.write("property uchar alpha\n")
         f.write(f"element face {n_faces}\n")
         f.write("property list uchar int vertex_indices\n")
         f.write("end_header\n")
 
         # Vertices
-        if has_colors:
+        if has_colors and has_opacity:
+            for (x, y, z), (r, g, b) in zip(vertices, colors):
+                f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)} {alpha_value}\n")
+        elif has_colors:
             for (x, y, z), (r, g, b) in zip(vertices, colors):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)}\n")
+        elif has_opacity:
+            for x, y, z in vertices:
+                f.write(f"{x:.6f} {y:.6f} {z:.6f} {alpha_value}\n")
         else:
             for x, y, z in vertices:
                 f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
@@ -296,6 +315,8 @@ def generate_meshes_for_bins(
     *,
     volume_color: Optional[np.ndarray] = None,
     global_mask: Optional[np.ndarray] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    phase_progress_callback: Optional[Callable[[str, int, int, int], None]] = None,
 ) -> List[Path]:
     """
     Generate meshes for a list of intensity bins.
@@ -345,10 +366,28 @@ def generate_meshes_for_bins(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     outputs: List[Path] = []
+    
+    enabled_bins = [b for b in bins if b.enabled]
+    total = len(enabled_bins)
+    
+    # Phase-aware progress: Building masks, Extracting meshes, Saving files
+    phase = "Building masks"
+    phase_current = 0
+    phase_total = total
+    overall_current = 0
+    overall_total = total * 3  # 3 phases: build, extract, save
+    
+    if phase_progress_callback:
+        phase_progress_callback(phase, 0, phase_total, overall_total)
 
-    for bin_ in bins:
-        if not bin_.enabled:
-            continue
+    for i, bin_ in enumerate(enabled_bins):
+        if progress_callback:
+            progress_callback(i, total)
+        
+        if phase_progress_callback:
+            phase_current = i + 1
+            overall_current = i
+            phase_progress_callback(phase, phase_current, phase_total, overall_total)
 
         # 1) Build mask for this bin
         bin_mask = binsmod.build_bin_mask(volume_gray, bin_)
@@ -382,20 +421,140 @@ def generate_meshes_for_bins(
         if cfg.skip_empty_bins and np.count_nonzero(bin_mask_smooth) == 0:
             continue
 
+        # Switch to extracting phase
+        if phase_progress_callback and i == 0:
+            phase = "Extracting meshes"
+            phase_current = 0
+            phase_total = total
+            phase_progress_callback(phase, 0, phase_total, overall_total)
+        
         # 5) Extract mesh
         verts, faces, colors = extract_mesh(bin_mask_smooth, volume_color, cfg)
+        
+        if phase_progress_callback:
+            phase_current = i + 1
+            overall_current = total + i
+            phase_progress_callback(phase, phase_current, phase_total, overall_total)
 
         if verts.size == 0 or faces.size == 0:
             # No geometry produced (e.g. extremely small bin) – skip
             continue
 
-        # 6) Save mesh
+        # 6) Apply bin color if specified (override volume colors)
+        if bin_.color is not None:
+            # Use bin color for all vertices
+            # Colors are stored as sRGB-compatible RGB values (0-255) for Blender
+            r, g, b = bin_.color
+            # Ensure values are in [0, 1] range and convert to sRGB uint8
+            r = max(0.0, min(1.0, r))
+            g = max(0.0, min(1.0, g))
+            b = max(0.0, min(1.0, b))
+            # Convert to sRGB uint8 (0-255) - these are already in sRGB color space
+            bin_color_rgb = np.array([int(r * 255), int(g * 255), int(b * 255)], dtype=np.uint8)
+            colors = np.tile(bin_color_rgb, (verts.shape[0], 1))
+        elif colors is None:
+            # If no colors from volume and no bin color, use default gray
+            colors = np.full((verts.shape[0], 3), 128, dtype=np.uint8)
+
+        # Switch to saving phase
+        if phase_progress_callback and i == 0:
+            phase = "Saving files"
+            phase_current = 0
+            phase_total = total
+            phase_progress_callback(phase, 0, phase_total, overall_total)
+        
+        # 7) Save mesh (round intensity values to integers)
+        low_int = int(round(bin_.low))
+        high_int = int(round(bin_.high))
+        # Get file extension from output path or default to .ply
+        # The save function will be called with the correct path
+        ext = "ply"  # Default, will be overridden by format if needed
         fname = (
             f"{cfg.output_prefix}_bin_{bin_.index:02d}"
-            f"_{bin_.low}_{bin_.high}.ply"
+            f"_{low_int}_{high_int}.{ext}"
         )
         out_path = output_dir / fname
-        save_mesh_ply(out_path, verts, faces, colors)
+        # Get opacity from config if available, otherwise None
+        opacity = getattr(cfg, 'opacity', None)
+        save_mesh_ply(out_path, verts, faces, colors, opacity=opacity)
         outputs.append(out_path)
+        
+        if phase_progress_callback:
+            phase_current = i + 1
+            overall_current = total * 2 + i
+            phase_progress_callback(phase, phase_current, phase_total, overall_total)
+    
+    if progress_callback:
+        progress_callback(total, total)
+    
+    if phase_progress_callback:
+        phase_progress_callback(phase, phase_total, phase_total, overall_total)
 
     return outputs
+
+
+def generate_meshes_from_volume(
+    volume: np.ndarray,
+    config: MeshingConfig,
+    output_dir: Path,
+    filename_prefix: str = "ct_layer",
+    bins: Optional[Sequence[IntensityBin]] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    phase_progress_callback: Optional[Callable[[str, int, int, int], None]] = None,
+) -> List[Path]:
+    """
+    High-level function to generate meshes from a volume with custom bins.
+    
+    This is a convenience wrapper that:
+    1. Converts the volume to grayscale
+    2. Calls generate_meshes_for_bins with the provided bins
+    
+    Parameters
+    ----------
+    volume : np.ndarray
+        Volume data, shape (Z, Y, X, 3) for RGB or (Z, Y, X) for grayscale
+    config : MeshingConfig
+        Meshing configuration
+    output_dir : Path
+        Directory where meshes will be saved
+    filename_prefix : str
+        Prefix for output filenames
+    bins : Optional[Sequence[IntensityBin]]
+        Custom bins to use. If None, generates uniform bins from config.
+    progress_callback : Optional[Callable[[int, int], None]]
+        Optional callback function(current, total) for progress updates
+        
+    Returns
+    -------
+    List[Path]
+        Paths to generated PLY files
+    """
+    # Convert to grayscale if needed
+    if volume.ndim == 4 and volume.shape[-1] == 3:
+        volume_gray = volmod.to_grayscale(volume)
+        volume_color = volume
+    elif volume.ndim == 3:
+        volume_gray = volume.astype(np.uint8)
+        volume_color = None
+    else:
+        raise ValueError(f"Volume must be 3D or 4D, got shape {volume.shape}")
+    
+    # Get bins - use provided bins or generate uniform bins
+    from . import bins as binsmod
+    
+    if bins is None:
+        bins = binsmod.generate_uniform_bins(config)
+    
+    # Set output_dir in config
+    config.output_dir = output_dir
+    config.output_prefix = filename_prefix
+    
+    # Use the existing generate_meshes_for_bins function
+    return generate_meshes_for_bins(
+        volume_gray=volume_gray,
+        bins=bins,
+        cfg=config,
+        volume_color=volume_color,
+        progress_callback=progress_callback,
+        phase_progress_callback=phase_progress_callback,
+    )

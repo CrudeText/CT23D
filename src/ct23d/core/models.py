@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import numpy as np
+
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------
@@ -74,6 +76,35 @@ class PreprocessConfig:
     """
     If True, apply bed/headrest removal across the stack via
     remove_bed_and_headrest_sequence().
+    """
+
+    # --- Additional preprocessing options ---
+
+    remove_non_grayscale: bool = False
+    """
+    If True, turn all non-grayscale pixels black (set to 0,0,0) based on saturation threshold.
+    This is more aggressive than overlay removal - it completely removes color.
+    Uses the saturation_threshold parameter to determine what counts as non-grayscale.
+    """
+
+    object_mask: Optional[np.ndarray] = None
+    """
+    Optional 2D boolean mask (Y, X) for the selected slice to remove objects.
+    This mask will be tracked across the Z-stack using object matching.
+    If None, no object removal is applied.
+    """
+    
+    object_mask_slice_index: Optional[int] = None
+    """
+    Index of the slice (0-based) where object_mask was selected.
+    If None and object_mask is provided, defaults to 0 (first slice).
+    The mask will be propagated forward and backward from this slice.
+    """
+    
+    rotation: int = 0
+    """
+    Rotation angle in degrees (0, 90, 180, 270) to apply during preprocessing.
+    Positive = clockwise. Rotation is applied when loading images for processing.
     """
 
 

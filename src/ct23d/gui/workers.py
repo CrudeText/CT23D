@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -40,34 +39,45 @@ class WorkerBase(QThread):
 # Specialized worker for preprocessing
 # ---------------------------------------------------------------------------
 
-@dataclass
-class PreprocessWorkerConfig:
-    input_dir: Path
-    output_dir: Path
-    config: PreprocessConfig
-
-
 class PreprocessWorker(WorkerBase):
     """
     Run the preprocessing pipeline in a background thread.
     """
+    
+    # Custom signal for phase-aware progress
+    phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
 
-    def __init__(self, cfg: PreprocessWorkerConfig) -> None:
+    def __init__(self, cfg: PreprocessConfig) -> None:
         super().__init__()
         self._cfg = cfg
 
     def run(self) -> None:  # type: ignore[override]
         try:
-            def progress_cb(done: int, total: int) -> None:
-                self.progress.emit(done, total)
+            # Create a cancellation flag that can be checked
+            self._cancelled = False
+            
+            def progress_cb(phase: str, current: int, phase_total: int, overall_total: int) -> None:
+                # Check for interruption request FIRST, before any other operations
+                if self.isInterruptionRequested():
+                    self._cancelled = True
+                    raise InterruptedError("Preprocessing was cancelled by user")
+                # Emit both the standard progress (for compatibility) and phase-aware progress
+                self.progress.emit(current, overall_total)
+                self.phase_progress.emit(phase, current, phase_total, overall_total)
 
             result = preprocess_slices(
-                input_dir=self._cfg.input_dir,
-                output_dir=self._cfg.output_dir,
-                config=self._cfg.config,
-                progress_callback=progress_cb,
+                self._cfg,
+                progress_cb=progress_cb,
             )
+            
+            # Check one more time before finishing
+            if self.isInterruptionRequested() or self._cancelled:
+                raise InterruptedError("Preprocessing was cancelled by user")
+            
             self.finished.emit(result)
+        except InterruptedError as e:
+            # User cancelled - emit error signal
+            self.error.emit("Preprocessing was cancelled by user")
         except BaseException as exc:  # noqa: BLE001
             self._handle_exception(exc)
 

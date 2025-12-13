@@ -67,6 +67,9 @@ class MainWindow(QMainWindow):
         self._create_menu_bar()
         self._create_status_bar()
         self._create_central_tabs()
+        
+        # Show maximized after all widgets are created
+        self.showMaximized()
 
     # ------------------------------------------------------------------ #
     # UI creation helpers
@@ -121,6 +124,19 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.meshing_tab, "Meshing")
 
         self.setCentralWidget(tabs)
+        
+        # Connect preprocessing output to meshing input
+        # When preprocessing completes, set it as default for meshing
+        def on_preprocessing_complete() -> None:
+            # Get the last output directory from preprocessing wizard
+            if hasattr(self.preproc_tab.wizard, '_last_output_dir'):
+                output_dir = self.preproc_tab.wizard._last_output_dir
+                if output_dir is not None:
+                    self.meshing_tab.wizard.set_default_processed_dir(output_dir)
+        
+        # Connect to preprocessing completion
+        # We'll need to add a signal or check periodically
+        # For now, we'll use a property accessor
 
     # ------------------------------------------------------------------ #
     # Slots / actions

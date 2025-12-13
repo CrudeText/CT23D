@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import (
+    QApplication,
     QStatusBar,
     QMessageBox,
     QProgressDialog,
@@ -90,7 +92,36 @@ class StatusController(QObject):
         dialog.setValue(0)
 
         # Track the current maximum (total steps) for the progress bar.
-        state = {"max": 0}
+        state = {"max": 0, "current_phase": "starting", "phase_current": 0, "phase_total": 0, "phase_start_time": None}
+        
+        # Determine phase names based on title (different for preprocessing vs meshing)
+        is_meshing = "meshes" in (title or "").lower()
+        if is_meshing:
+            all_phases = ["Building masks", "Extracting meshes", "Saving files"]
+            phase_names = {
+                "Building masks": "Building masks",
+                "Extracting meshes": "Extracting meshes",
+                "Saving files": "Saving files"
+            }
+        else:
+            all_phases = ["loading", "processing", "saving"]
+            phase_names = {
+                "loading": "Loading images",
+                "processing": "Processing volume",
+                "saving": "Saving slices"
+            }
+        
+        # Track completed phases dynamically
+        completed_phases: dict[str, bool] = {}
+        for p in all_phases:
+            completed_phases[p] = False
+        
+        # Track start time for elapsed time calculation
+        start_time = time.time()
+        
+        # Timer for independent time updates
+        timer = QTimer()
+        timer.setInterval(100)  # Update every 100ms
 
         # Keep a strong reference to the worker while it is running.
         self._active_workers.append(worker)
@@ -102,19 +133,110 @@ class StatusController(QObject):
             # Ensure the thread has fully stopped before Qt destroys it.
             worker.wait()
 
+        def format_time(seconds: float) -> str:
+            """Format seconds as MM:SS or HH:MM:SS."""
+            seconds = int(seconds)
+            if seconds < 3600:
+                minutes = seconds // 60
+                secs = seconds % 60
+                return f"{minutes:02d}:{secs:02d}"
+            else:
+                hours = seconds // 3600
+                minutes = (seconds % 3600) // 60
+                secs = seconds % 60
+                return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+        def update_timer_display() -> None:
+            """Update timer display independently of progress updates."""
+            elapsed = time.time() - start_time
+            elapsed_str = format_time(elapsed)
+            
+            # Get current phase info
+            phase = state["current_phase"]
+            current = state["phase_current"]
+            phase_total = state["phase_total"]
+            
+            # Build phase status lines
+            status_lines = []
+            for p in all_phases:
+                p_name = phase_names.get(p, p.capitalize())
+                if completed_phases.get(p, False):
+                    status_lines.append(f"✓ {p_name}: Complete")
+                elif p == phase and phase_total > 0:
+                    status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+                else:
+                    status_lines.append(f"  {p_name}: Pending")
+            
+            status_text = "\n".join(status_lines)
+            
+            # Calculate estimated time remaining for current phase
+            if current > 0 and phase_total > 0 and state["phase_start_time"] is not None:
+                phase_elapsed = time.time() - state["phase_start_time"]
+                estimated_phase_total = phase_elapsed * phase_total / current if current > 0 else 0
+                phase_remaining = max(0, estimated_phase_total - phase_elapsed)
+                remaining_str = format_time(phase_remaining)
+                status_text += f"\n\nElapsed: {elapsed_str} | Remaining: ~{remaining_str}"
+            else:
+                status_text += f"\n\nElapsed: {elapsed_str}"
+            
+            dialog.setLabelText(status_text)
+        
+        def on_phase_progress(phase: str, current: int, phase_total: int, overall_total: int) -> None:
+            """Handle phase-aware progress updates."""
+            # Check if we're switching phases
+            if state["current_phase"] != phase:
+                # Reset progress bar for new phase
+                state["current_phase"] = phase
+                state["phase_current"] = 0
+                state["phase_total"] = phase_total
+                state["phase_start_time"] = time.time()
+                dialog.setValue(0)
+                dialog.setMaximum(phase_total)
+            
+            # Update phase progress
+            state["phase_current"] = current
+            state["phase_total"] = phase_total
+            
+            # Check if phase is complete
+            if current >= phase_total and phase_total > 0:
+                completed_phases[phase] = True
+            
+            # Update progress bar
+            dialog.setValue(current)
+            
+            # Update display (timer will also update it, but this ensures immediate update)
+            update_timer_display()
+            
+            # Force UI update
+            QApplication.processEvents()
+        
         def on_progress(done: int, total: int) -> None:
+            """Fallback progress handler (for compatibility)."""
             if total <= 0:
                 return
             if state["max"] != total:
                 state["max"] = total
                 dialog.setMaximum(total)
             dialog.setValue(done)
-            dialog.setLabelText(f"{done} / {total}")
+            QApplication.processEvents()
 
         def on_error(message: str) -> None:
-            dialog.hide()
-            cleanup_worker()
-            self.show_error(message)
+            timer.stop()
+            # Don't hide dialog immediately - let user see the cancellation
+            if "cancelled" in message.lower() or "cancel" in message.lower():
+                # Update dialog to show cancellation message clearly
+                dialog.setLabelText(f"⚠️ {message}\n\nThe preprocessing has been stopped.")
+                dialog.setCancelButtonText("Close")
+                dialog.setCancelButtonEnabled(True)
+                dialog.setValue(dialog.maximum())  # Set to 100% to show it's done
+                # Force UI update immediately
+                QApplication.processEvents()
+                # Keep dialog open and let user close it manually
+                # Don't auto-close - user can click "Close" button when ready
+            else:
+                dialog.hide()
+                cleanup_worker()
+                self.show_error(message)
 
         def on_finished(result: object) -> None:
             dialog.hide()
@@ -123,12 +245,41 @@ class StatusController(QObject):
                 on_success(result)
 
         # Wire up signals
-        dialog.canceled.connect(worker.requestInterruption)
+        def on_cancel() -> None:
+            """Handle cancel button click."""
+            worker.requestInterruption()
+            dialog.setLabelText(f"{dialog.labelText()}\n\n⚠️ Cancelling... Please wait.")
+            dialog.setCancelButtonText("Cancelling...")
+            dialog.setCancelButtonEnabled(False)  # Disable cancel button while stopping
+        
+        dialog.canceled.connect(on_cancel)
         worker.progress.connect(on_progress)   # type: ignore[arg-type]
+        
+        # Connect phase-aware progress if available (for PreprocessWorker)
+        if hasattr(worker, 'phase_progress'):
+            worker.phase_progress.connect(on_phase_progress)  # type: ignore[attr-defined]
+        
         worker.error.connect(on_error)        # type: ignore[arg-type]
         worker.finished.connect(on_finished)  # type: ignore[arg-type]
         worker.finished.connect(worker.deleteLater)
+        
+        # Connect timer to update display independently
+        timer.timeout.connect(update_timer_display)
+        timer.start()
 
         # Start background work and show dialog
+        # Set initial label based on title (different phases for different tasks)
+        if "meshes" in (title or "").lower():
+            initial_text = "  Building masks: Pending\n  Extracting meshes: Pending\n  Saving files: Pending\n\nElapsed: 00:00"
+        else:
+            initial_text = "  Loading images: Pending\n  Processing volume: Pending\n  Saving slices: Pending\n\nElapsed: 00:00"
+        dialog.setLabelText(initial_text)
         worker.start()
         dialog.show()
+        
+        # Stop timer when finished
+        worker.finished.connect(timer.stop)
+        worker.error.connect(timer.stop)
+        
+        # Force initial UI update
+        QApplication.processEvents()
