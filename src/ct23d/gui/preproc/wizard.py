@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QRadioButton,
+    QSlider,
 )
 from PySide6.QtCore import QPoint, QRect
 
@@ -302,9 +304,9 @@ class SelectableImageLabel(QLabel):
             super().mousePressEvent(event)
             return
             
-        # Check if selection mode is enabled
+        # Check if selection mode or crop mode is enabled
         if hasattr(self, 'parent_wizard') and hasattr(self.parent_wizard, 'selection_mode'):
-            if not self.parent_wizard.selection_mode:
+            if not self.parent_wizard.selection_mode and not getattr(self.parent_wizard, 'crop_mode', False):
                 super().mousePressEvent(event)
                 return
                 
@@ -322,7 +324,7 @@ class SelectableImageLabel(QLabel):
                             object_id = str(uuid.uuid4())
                             self.object_selected.emit(mask, object_id)
                 else:
-                    # Box or lasso: start drawing
+                    # Box or lasso: start drawing (works for both object selection and crop)
                     self.drawing = True
                     self.start_point = event.position().toPoint()
                     self.end_point = self.start_point
@@ -335,9 +337,9 @@ class SelectableImageLabel(QLabel):
             super().mouseMoveEvent(event)
             return
             
-        # Check if selection mode is enabled
+        # Check if selection mode or crop mode is enabled
         if hasattr(self, 'parent_wizard') and hasattr(self.parent_wizard, 'selection_mode'):
-            if not self.parent_wizard.selection_mode:
+            if not self.parent_wizard.selection_mode and not getattr(self.parent_wizard, 'crop_mode', False):
                 # Still allow hover highlighting
                 if self.tool_mode == "click":
                     coords = self._label_to_image_coords(event.position().toPoint())
@@ -397,7 +399,7 @@ class SelectableImageLabel(QLabel):
                         object_id = str(uuid.uuid4())
                         self.object_selected.emit(mask, object_id)
                 self.lasso_points = []
-                
+            
             self._update_display()
             
     def _create_box_mask(self, rect: QRect) -> Optional[np.ndarray]:
@@ -438,12 +440,16 @@ class SelectableImageLabel(QLabel):
         if x2 > x1 and y2 > y1:
             mask[y1:y2, x1:x2] = True
             
-            # Filter out black background (intensity < 10)
-            gray = (self.original_image[..., 0].astype(np.float32) + 
-                   self.original_image[..., 1].astype(np.float32) + 
-                   self.original_image[..., 2].astype(np.float32)) / 3.0
-            black_mask = gray < 10
-            mask = mask & ~black_mask
+            # Only filter out black background for object removal, not for crops
+            # For crops, we want to preserve all pixels inside the selection, including black ones
+            is_crop_mode = hasattr(self, 'parent_wizard') and getattr(self.parent_wizard, 'crop_mode', False)
+            if not is_crop_mode:
+                # Filter out black background (intensity < 10) for object removal
+                gray = (self.original_image[..., 0].astype(np.float32) + 
+                       self.original_image[..., 1].astype(np.float32) + 
+                       self.original_image[..., 2].astype(np.float32)) / 3.0
+                black_mask = gray < 10
+                mask = mask & ~black_mask
             
             return mask
         return None
@@ -490,12 +496,16 @@ class SelectableImageLabel(QLabel):
             rr, cc = polygon(rows, cols, shape=mask.shape)
             mask[rr, cc] = True
             
-            # Filter out black background (intensity < 10)
-            gray = (self.original_image[..., 0].astype(np.float32) + 
-                   self.original_image[..., 1].astype(np.float32) + 
-                   self.original_image[..., 2].astype(np.float32)) / 3.0
-            black_mask = gray < 10
-            mask = mask & ~black_mask
+            # Only filter out black background for object removal, not for crops
+            # For crops, we want to preserve all pixels inside the selection, including black ones
+            is_crop_mode = hasattr(self, 'parent_wizard') and getattr(self.parent_wizard, 'crop_mode', False)
+            if not is_crop_mode:
+                # Filter out black background (intensity < 10) for object removal
+                gray = (self.original_image[..., 0].astype(np.float32) + 
+                       self.original_image[..., 1].astype(np.float32) + 
+                       self.original_image[..., 2].astype(np.float32)) / 3.0
+                black_mask = gray < 10
+                mask = mask & ~black_mask
             
             return mask
         except Exception:
@@ -530,6 +540,42 @@ class SelectableImageLabel(QLabel):
                                   overlay.shape[1] * 4, QImage.Format.Format_RGBA8888)
             overlay_pixmap = QPixmap.fromImage(overlay_image)
             painter.drawPixmap(0, 0, overlay_pixmap)
+        
+        # Draw crop masks (green) - both from table and current selection
+        if hasattr(self, 'parent_wizard'):
+            # Draw current crop mask being drawn
+            if getattr(self.parent_wizard, 'current_crop_mask', None) is not None:
+                crop_mask = self.parent_wizard.current_crop_mask
+                if crop_mask.shape == self.original_image.shape[:2]:
+                    pixmap_rect = self.original_pixmap.rect()
+                    scale_x = pixmap_rect.width() / crop_mask.shape[1]
+                    scale_y = pixmap_rect.height() / crop_mask.shape[0]
+                    
+                    coords = np.where(crop_mask)
+                    if len(coords[0]) > 0:
+                        y_min, y_max = int(coords[0].min() * scale_y), int(coords[0].max() * scale_y)
+                        x_min, x_max = int(coords[1].min() * scale_x), int(coords[1].max() * scale_x)
+                        painter.setPen(QPen(QColor(0, 255, 0, 255), 3))  # Green for crop
+                        painter.drawRect(x_min, y_min, x_max - x_min, y_max - y_min)
+            
+            # Draw crop masks from table (only if current slice is in range)
+            if hasattr(self.parent_wizard, 'selected_objects') and hasattr(self.parent_wizard, 'current_image_index'):
+                current_slice = self.parent_wizard.current_image_index
+                for crop_obj in [obj for obj in self.parent_wizard.selected_objects if obj.get('type') == 'Crop' and obj.get('mask') is not None]:
+                    crop_mask = crop_obj.get('mask')
+                    slice_min = crop_obj.get('slice_min', 0)
+                    slice_max = crop_obj.get('slice_max', 0)
+                    if slice_min <= current_slice <= slice_max and crop_mask.shape == self.original_image.shape[:2]:
+                        pixmap_rect = self.original_pixmap.rect()
+                        scale_x = pixmap_rect.width() / crop_mask.shape[1]
+                        scale_y = pixmap_rect.height() / crop_mask.shape[0]
+                        
+                        coords = np.where(crop_mask)
+                        if len(coords[0]) > 0:
+                            y_min, y_max = int(coords[0].min() * scale_y), int(coords[0].max() * scale_y)
+                            x_min, x_max = int(coords[1].min() * scale_x), int(coords[1].max() * scale_x)
+                            painter.setPen(QPen(QColor(0, 200, 0, 255), 2))  # Darker green for saved crops
+                            painter.drawRect(x_min, y_min, x_max - x_min, y_max - y_min)
         
         # Draw existing selections (red)
         painter.setPen(QPen(QColor(255, 0, 0, 255), 2))
@@ -631,9 +677,11 @@ class PreprocessWizard(QWidget):
         self.object_mask: Optional[np.ndarray] = None  # Combined mask for all selected objects
         self.selection_mode: bool = False  # Whether user is in selection mode
         self.tool_mode: str = "box"  # "box", "lasso", or "click"
-        self.selected_objects: list[dict] = []  # List of {mask, label, id, slice_index} for each selected object
+        self.selected_objects: list[dict] = []  # List of {mask, label, id, slice_index, type, slice_min, slice_max} for each selected object
         self.image_rotation: int = 0  # Rotation angle in degrees (0, 90, 180, 270)
         self.mask_selected_slice_index: Optional[int] = None  # Slice where mask was originally selected
+        self.crop_mode: bool = False  # Whether user is in crop selection mode
+        self.current_crop_mask: Optional[np.ndarray] = None  # Current crop mask being drawn (not yet added to table)
         
         # Auto-detection parameters
         self.auto_detect_params = {
@@ -683,7 +731,7 @@ class PreprocessWizard(QWidget):
             preview_group.setMinimumHeight(500)  # Ensure it has minimum height
             preview_group_layout = QVBoxLayout(preview_group)
             
-            # Image selector
+            # Image selector with slider
             selector_layout = QHBoxLayout()
             selector_layout.addWidget(QLabel("Preview slice:"))
             self.image_selector = QSpinBox()
@@ -694,6 +742,16 @@ class PreprocessWizard(QWidget):
             selector_layout.addWidget(self.image_selector)
             self.image_count_label = QLabel("of 0")
             selector_layout.addWidget(self.image_count_label)
+            
+            # Slider for quick navigation
+            self.slice_slider = QSlider(Qt.Orientation.Horizontal)
+            self.slice_slider.setRange(1, 1)
+            self.slice_slider.setValue(1)
+            self.slice_slider.setEnabled(False)
+            self.slice_slider.setMinimumWidth(200)
+            self.slice_slider.valueChanged.connect(self.on_slider_changed)
+            self.image_selector.valueChanged.connect(self.on_selector_changed)  # Sync slider when spinbox changes (but don't trigger preview)
+            selector_layout.addWidget(self.slice_slider)
             selector_layout.addStretch()
             preview_group_layout.addLayout(selector_layout)
 
@@ -722,15 +780,59 @@ class PreprocessWizard(QWidget):
             params_group = QGroupBox("Preprocessing Parameters")
             params_layout = QVBoxLayout(params_group)
             
-            # grayscale tolerance
-            hl1 = QHBoxLayout()
-            hl1.addWidget(QLabel("Grayscale tolerance:"))
-            self.gray_spin = QSpinBox()
-            self.gray_spin.setRange(0, 50)
-            self.gray_spin.setValue(1)
-            self.gray_spin.valueChanged.connect(self.update_preview)
-            hl1.addWidget(self.gray_spin)
-            params_layout.addLayout(hl1)
+            # Black threshold (formerly grayscale tolerance) - now with min and max
+            black_threshold_layout = QVBoxLayout()
+            black_threshold_row = QHBoxLayout()
+            black_threshold_row.addWidget(QLabel("Black Threshold (Min / Max):"))
+            self.black_threshold_min_spin = QSpinBox()
+            self.black_threshold_min_spin.setRange(0, 255)
+            self.black_threshold_min_spin.setValue(0)
+            self.black_threshold_min_spin.setToolTip(
+                "Minimum intensity value for black threshold range. "
+                "Pixels with average RGB intensity below this value will be considered black."
+            )
+            self.black_threshold_min_spin.valueChanged.connect(self._on_black_threshold_min_changed)
+            black_threshold_row.addWidget(self.black_threshold_min_spin)
+            
+            black_threshold_row.addWidget(QLabel("to"))
+            
+            self.black_threshold_max_spin = QSpinBox()
+            self.black_threshold_max_spin.setRange(0, 255)
+            self.black_threshold_max_spin.setValue(1)
+            self.black_threshold_max_spin.setToolTip(
+                "Maximum intensity value for black threshold range. "
+                "Pixels with average RGB intensity above this value will NOT be considered black."
+            )
+            self.black_threshold_max_spin.valueChanged.connect(self._on_black_threshold_max_changed)
+            black_threshold_row.addWidget(self.black_threshold_max_spin)
+            black_threshold_row.addStretch()
+            black_threshold_layout.addLayout(black_threshold_row)
+            
+            # Keep old gray_spin for backward compatibility with existing code
+            # But it's now calculated from min/max for the actual threshold value
+            self.gray_spin = self.black_threshold_max_spin  # Use max as the "tolerance" value
+            
+            # Visualize and Select buttons
+            black_threshold_buttons = QHBoxLayout()
+            self.visualize_black_btn = QPushButton("Visualize")
+            self.visualize_black_btn.setToolTip("Highlight pixels that will be removed (within black threshold range). Click again to stop visualizing.")
+            self.visualize_black_btn.setCheckable(True)
+            self.visualize_black_btn.clicked.connect(self.toggle_visualize_black_threshold)
+            self.visualize_black_btn.setEnabled(False)
+            black_threshold_buttons.addWidget(self.visualize_black_btn)
+            
+            self.select_black_btn = QPushButton("Select")
+            self.select_black_btn.setToolTip("Add pixels within black threshold range to selected objects for removal from all slices")
+            self.select_black_btn.clicked.connect(self.select_black_threshold)
+            self.select_black_btn.setEnabled(False)
+            black_threshold_buttons.addWidget(self.select_black_btn)
+            black_threshold_buttons.addStretch()
+            black_threshold_layout.addLayout(black_threshold_buttons)
+            
+            params_layout.addLayout(black_threshold_layout)
+            
+            # Track if we're visualizing black threshold
+            self.visualizing_black_threshold = False
 
             # saturation threshold
             hl2 = QHBoxLayout()
@@ -746,7 +848,7 @@ class PreprocessWizard(QWidget):
             # remove non-grayscale checkbox
             self.remove_non_grayscale_cb = QCheckBox("Remove non-grayscale pixels (turn black)")
             self.remove_non_grayscale_cb.setChecked(False)
-            self.remove_non_grayscale_cb.toggled.connect(self.update_preview)
+            self.remove_non_grayscale_cb.toggled.connect(self._on_non_grayscale_toggled)
             params_layout.addWidget(self.remove_non_grayscale_cb)
             
             controls_column.addWidget(params_group)
@@ -811,35 +913,27 @@ class PreprocessWizard(QWidget):
             
             selection_layout.addLayout(auto_detect_layout)
             
-            # Rotation controls
-            rotation_group = QGroupBox("Image Rotation")
-            rotation_layout = QVBoxLayout(rotation_group)
-            rotation_info = QLabel(
-                "⚠️ Auto-detect scans from BOTTOM UPWARD to find bed/headrest.\n"
-                "The bed/headrest must be UNDERNEATH the body/head.\n"
-                "If needed, rotate images so the bed is at the bottom."
-            )
-            rotation_info.setWordWrap(True)
-            rotation_info.setStyleSheet("color: orange; font-weight: bold;")
-            rotation_layout.addWidget(rotation_info)
+            # Image transformation controls (rotation and cropping)
+            transform_group = QGroupBox("Image Transformation")
+            transform_layout = QVBoxLayout(transform_group)
             
-            rotation_buttons_layout = QHBoxLayout()
+            # Rotation section
+            rotation_section = QHBoxLayout()
+            rotation_section.addWidget(QLabel("Rotation:"))
             self.rotate_90_cw_btn = QPushButton("Rotate 90° CW")
             self.rotate_90_cw_btn.setEnabled(False)
             self.rotate_90_cw_btn.clicked.connect(lambda: self.rotate_images(90))
-            rotation_buttons_layout.addWidget(self.rotate_90_cw_btn)
+            rotation_section.addWidget(self.rotate_90_cw_btn)
             
             self.rotate_90_ccw_btn = QPushButton("Rotate 90° CCW")
             self.rotate_90_ccw_btn.setEnabled(False)
             self.rotate_90_ccw_btn.clicked.connect(lambda: self.rotate_images(-90))
-            rotation_buttons_layout.addWidget(self.rotate_90_ccw_btn)
+            rotation_section.addWidget(self.rotate_90_ccw_btn)
             
             self.rotate_180_btn = QPushButton("Rotate 180°")
             self.rotate_180_btn.setEnabled(False)
             self.rotate_180_btn.clicked.connect(lambda: self.rotate_images(180))
-            rotation_buttons_layout.addWidget(self.rotate_180_btn)
-            
-            rotation_layout.addLayout(rotation_buttons_layout)
+            rotation_section.addWidget(self.rotate_180_btn)
             
             rotation_status_layout = QHBoxLayout()
             rotation_status_layout.addWidget(QLabel("Current rotation:"))
@@ -847,18 +941,49 @@ class PreprocessWizard(QWidget):
             self.rotation_label.setStyleSheet("font-weight: bold;")
             rotation_status_layout.addWidget(self.rotation_label)
             rotation_status_layout.addStretch()
-            rotation_layout.addLayout(rotation_status_layout)
+            rotation_section.addLayout(rotation_status_layout)
+            transform_layout.addLayout(rotation_section)
             
-            selection_layout.addWidget(rotation_group)
+            # Crop section
+            transform_layout.addWidget(QLabel("Crop:"))
+            transform_layout.addWidget(QLabel("Note: Slice ranges for crops are managed in the modifications table below."))
             
-            # Selected objects table
-            selection_layout.addWidget(QLabel("Selected Objects:"))
-            self.objects_table = QTableWidget(0, 2, self)
-            self.objects_table.setHorizontalHeaderLabels(["Label (optional)", "Actions"])
-            self.objects_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-            self.objects_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-            self.objects_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            # Crop pixel selection
+            crop_pixel_layout = QHBoxLayout()
+            self.start_crop_btn = QPushButton("Start Crop Selection")
+            self.start_crop_btn.setEnabled(False)
+            self.start_crop_btn.setToolTip("Select pixels to keep using box or lasso tool. After selection, click 'Add Crop' to add it to the table.")
+            self.start_crop_btn.clicked.connect(self.toggle_crop_mode)
+            crop_pixel_layout.addWidget(self.start_crop_btn)
+            
+            self.cancel_crop_btn = QPushButton("Cancel Crop")
+            self.cancel_crop_btn.setEnabled(False)
+            self.cancel_crop_btn.setToolTip("Cancel the current crop selection and exit crop mode")
+            self.cancel_crop_btn.clicked.connect(self.cancel_crop)
+            crop_pixel_layout.addWidget(self.cancel_crop_btn)
+            
+            self.add_crop_btn = QPushButton("Add Crop")
+            self.add_crop_btn.setEnabled(False)
+            self.add_crop_btn.setToolTip("Add the current crop selection to the modifications table")
+            self.add_crop_btn.clicked.connect(self.add_crop_to_table)
+            crop_pixel_layout.addWidget(self.add_crop_btn)
+            crop_pixel_layout.addStretch()
+            transform_layout.addLayout(crop_pixel_layout)
+            
+            selection_layout.addWidget(transform_group)
+            
+            # Modifications table (objects to remove, crops, and other modifications)
+            selection_layout.addWidget(QLabel("Image Modifications (will be applied during preprocessing):"))
+            self.objects_table = QTableWidget(0, 5, self)
+            self.objects_table.setHorizontalHeaderLabels(["Type", "Label", "Slice Min", "Slice Max", "Actions"])
+            self.objects_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            self.objects_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            self.objects_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            self.objects_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            self.objects_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+            self.objects_table.setEditTriggers(QAbstractItemView.AllEditTriggers)
             self.objects_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.objects_table.cellChanged.connect(self._on_table_cell_changed)
             selection_layout.addWidget(self.objects_table)
             
             controls_column.addWidget(selection_group)
@@ -890,9 +1015,43 @@ class PreprocessWizard(QWidget):
             layout.addWidget(error_label)
 
         # ------------------------------------------------------------------
-        # Run button
+        # Export range selection
         # ------------------------------------------------------------------
-        run_btn = QPushButton("Run preprocessing")
+        export_range_group = QGroupBox("Export Range")
+        export_range_layout = QHBoxLayout(export_range_group)
+        
+        self.export_all_rb = QRadioButton("Export all slices")
+        self.export_all_rb.setChecked(True)  # Default
+        self.export_all_rb.toggled.connect(self._on_export_range_changed)
+        export_range_layout.addWidget(self.export_all_rb)
+        
+        self.export_range_rb = QRadioButton("Export slice range:")
+        self.export_range_rb.toggled.connect(self._on_export_range_changed)
+        export_range_layout.addWidget(self.export_range_rb)
+        
+        self.export_slice_min_spin = QSpinBox()
+        self.export_slice_min_spin.setRange(1, 1)
+        self.export_slice_min_spin.setValue(1)
+        self.export_slice_min_spin.setEnabled(False)
+        self.export_slice_min_spin.setToolTip("First slice to export (1-based)")
+        export_range_layout.addWidget(self.export_slice_min_spin)
+        
+        export_range_layout.addWidget(QLabel("to"))
+        
+        self.export_slice_max_spin = QSpinBox()
+        self.export_slice_max_spin.setRange(1, 1)
+        self.export_slice_max_spin.setValue(1)
+        self.export_slice_max_spin.setEnabled(False)
+        self.export_slice_max_spin.setToolTip("Last slice to export (1-based, inclusive)")
+        export_range_layout.addWidget(self.export_slice_max_spin)
+        
+        export_range_layout.addStretch()
+        layout.addWidget(export_range_group)
+        
+        # ------------------------------------------------------------------
+        # Export button
+        # ------------------------------------------------------------------
+        run_btn = QPushButton("Export processed images")
         run_btn.clicked.connect(self.run_preprocessing)
         layout.addWidget(run_btn)
 
@@ -950,20 +1109,47 @@ class PreprocessWizard(QWidget):
             )
             return
 
-        # Combine all selected object masks
+        # Separate objects by type and slice range
+        # For object removal masks, combine them (they're applied together)
+        removal_objects = [obj for obj in self.selected_objects if obj.get('type') == 'Selection removal' and obj.get('mask') is not None]
         combined_mask = None
-        if self.selected_objects:
+        if removal_objects:
             combined_mask = np.zeros(
-                (self.selected_objects[0]['mask'].shape[0], 
-                 self.selected_objects[0]['mask'].shape[1]),
+                (removal_objects[0]['mask'].shape[0], 
+                 removal_objects[0]['mask'].shape[1]),
                 dtype=bool
             )
-            for obj in self.selected_objects:
+            for obj in removal_objects:
                 if obj['mask'] is not None:
                     combined_mask = combined_mask | obj['mask']
 
         # Get the slice index where mask was selected (use the tracked slice index)
         mask_slice_index = self.mask_selected_slice_index if combined_mask is not None else None
+        
+        # Collect crop masks with their slice ranges
+        crop_objects = [obj for obj in self.selected_objects if obj.get('type') == 'Crop' and obj.get('mask') is not None]
+        
+        # Extract non-grayscale slice ranges
+        non_grayscale_objects = [obj for obj in self.selected_objects if obj.get('type') == 'Remove non-grayscale']
+        non_grayscale_ranges = []
+        for obj in non_grayscale_objects:
+            slice_min = obj.get('slice_min', 0)
+            slice_max = obj.get('slice_max', len(self.image_paths) - 1)
+            non_grayscale_ranges.append((slice_min, slice_max))
+        
+        # Get export slice range
+        export_slice_range = None
+        if self.export_range_rb.isChecked():
+            min_slice = self.export_slice_min_spin.value() - 1  # Convert to 0-based
+            max_slice = self.export_slice_max_spin.value() - 1  # Convert to 0-based
+            if min_slice > max_slice:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Export Range",
+                    "Minimum slice cannot be greater than maximum slice."
+                )
+                return
+            export_slice_range = (min_slice, max_slice)
         
         # Disable cache if we have object masks or rotation, since those change the output
         use_cache = (combined_mask is None and self.image_rotation == 0)
@@ -972,13 +1158,17 @@ class PreprocessWizard(QWidget):
             input_dir=self.input_dir,
             processed_dir=self.output_dir,
             use_cache=use_cache,
-            grayscale_tolerance=self.gray_spin.value(),
+            grayscale_tolerance=self.black_threshold_max_spin.value(),  # Use max as tolerance for overlay removal
             saturation_threshold=self.sat_spin.value(),
             remove_bed=False,  # Removed - use object selection instead
-            remove_non_grayscale=self.remove_non_grayscale_cb.isChecked(),
-            object_mask=combined_mask,
-            object_mask_slice_index=mask_slice_index,
+            remove_non_grayscale=len(non_grayscale_objects) > 0,  # Legacy flag
+            object_mask=combined_mask,  # Legacy support
+            object_mask_slice_index=mask_slice_index,  # Legacy support
             rotation=self.image_rotation,  # Apply rotation during preprocessing
+            crop_objects=crop_objects,  # List of crop objects with masks and slice ranges
+            object_removal_objects=removal_objects,  # List of removal objects with masks and slice ranges
+            non_grayscale_slice_ranges=non_grayscale_ranges if non_grayscale_ranges else None,  # Slice ranges for non-grayscale removal
+            export_slice_range=export_slice_range,  # Export slice range
         )
 
         project = ProjectConfig(
@@ -1069,10 +1259,22 @@ class PreprocessWizard(QWidget):
             num_images = len(self.image_paths)
             
             if num_images > 0:
+                # Calculate middle index first (1-indexed)
+                middle_idx = (num_images // 2) + 1
+                
                 # Set up image selector
                 self.image_selector.setRange(1, num_images)
                 self.image_selector.setEnabled(True)
                 self.image_count_label.setText(f"of {num_images}")
+                self.slice_slider.setRange(1, num_images)
+                self.slice_slider.setValue(middle_idx)
+                self.slice_slider.setEnabled(True)
+                
+                # Update export range controls
+                self.export_slice_min_spin.setRange(1, num_images)
+                self.export_slice_min_spin.setValue(1)
+                self.export_slice_max_spin.setRange(1, num_images)
+                self.export_slice_max_spin.setValue(num_images)
                 
                 # Enable object selection buttons
                 self.select_objects_btn.setEnabled(True)
@@ -1082,11 +1284,14 @@ class PreprocessWizard(QWidget):
                 self.rotate_90_cw_btn.setEnabled(True)
                 self.rotate_90_ccw_btn.setEnabled(True)
                 self.rotate_180_btn.setEnabled(True)
+                self.visualize_black_btn.setEnabled(True)
+                self.select_black_btn.setEnabled(True)
+                self.start_crop_btn.setEnabled(True)
+                # Note: Slice ranges are now managed in the modifications table
                 if len(self.selected_objects) > 0:
                     self.clear_selection_btn.setEnabled(True)
                 
-                # Start with middle image (1-indexed)
-                middle_idx = (num_images // 2) + 1
+                # Set current image index and update selector
                 self.current_image_index = middle_idx - 1  # Convert to 0-indexed
                 # Block signals temporarily to avoid double update
                 self.image_selector.blockSignals(True)
@@ -1114,12 +1319,38 @@ class PreprocessWizard(QWidget):
             self.image_paths = []
             self.image_selector.setEnabled(False)
             self.image_count_label.setText("of 0")
+            self.slice_slider.setEnabled(False)
             self.before_label.setText(f"Error: {str(e)}")
             self.after_label.setText(f"Error: {str(e)}")
 
+    def on_slider_changed(self, value: int) -> None:
+        """Handle slider value change - update spinbox and preview."""
+        if self.image_selector.value() != value:
+            self.image_selector.blockSignals(True)
+            self.image_selector.setValue(value)
+            self.image_selector.blockSignals(False)
+            self.on_image_selected(value)
+    
+    def on_selector_changed(self, value: int) -> None:
+        """Handle spinbox value change - update slider."""
+        if self.slice_slider.value() != value:
+            self.slice_slider.blockSignals(True)
+            self.slice_slider.setValue(value)
+            self.slice_slider.blockSignals(False)
+    
+    def _on_export_range_changed(self) -> None:
+        """Handle export range radio button changes."""
+        if self.export_range_rb.isChecked():
+            self.export_slice_min_spin.setEnabled(True)
+            self.export_slice_max_spin.setEnabled(True)
+        else:
+            self.export_slice_min_spin.setEnabled(False)
+            self.export_slice_max_spin.setEnabled(False)
+    
     def on_image_selected(self, value: int) -> None:
         """Handle when user changes the image selector."""
         self.current_image_index = value - 1  # Convert to 0-indexed
+        # Keep visualization state but update preview
         self.update_preview()
 
     def numpy_to_qpixmap(self, arr: np.ndarray) -> QPixmap:
@@ -1144,6 +1375,100 @@ class PreprocessWizard(QWidget):
         # QPixmap.fromImage copies the data, so arr_copy can be garbage collected
         return QPixmap.fromImage(qimage)
 
+    def _get_black_threshold_mask(self, rgb: np.ndarray, min_value: int, max_value: int) -> np.ndarray:
+        """
+        Get mask of pixels that are considered black based on min/max threshold range.
+        
+        A pixel is considered black if its average RGB intensity is between min_value and max_value (inclusive).
+        This identifies pixels within a specific intensity range (typically dark/black pixels).
+        """
+        # Calculate average intensity for each pixel
+        arr = rgb.astype(np.float32)
+        avg_intensity = (arr[..., 0] + arr[..., 1] + arr[..., 2]) / 3.0
+        
+        # Pixels where average intensity is within the range
+        black_mask = (avg_intensity >= min_value) & (avg_intensity <= max_value)
+        return black_mask.astype(bool)
+    
+    def toggle_visualize_black_threshold(self) -> None:
+        """Toggle visualization of pixels that will be removed based on black threshold."""
+        if not self.image_paths or self.current_image_index < 0:
+            self.visualize_black_btn.setChecked(False)
+            return
+        
+        self.visualizing_black_threshold = self.visualize_black_btn.isChecked()
+        if self.visualizing_black_threshold:
+            self.visualize_black_btn.setText("Stop Visualizing")
+        else:
+            self.visualize_black_btn.setText("Visualize")
+        self.update_preview()
+    
+    def select_black_threshold(self) -> None:
+        """Add black threshold pixels to selected objects for removal from all slices."""
+        if not self.image_paths or self.current_image_index < 0:
+            return
+        
+        try:
+            # Load current image
+            image_path = self.image_paths[self.current_image_index]
+            original_rgb = images.load_image_rgb(image_path, rotation=0)
+            
+            # Get black threshold mask using min and max values
+            min_value = self.black_threshold_min_spin.value()
+            max_value = self.black_threshold_max_spin.value()
+            
+            if min_value > max_value:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Range",
+                    "Minimum value cannot be greater than maximum value.\n"
+                    "Please adjust the threshold range."
+                )
+                return
+            
+            black_mask = self._get_black_threshold_mask(original_rgb, min_value, max_value)
+            
+            if np.sum(black_mask) == 0:
+                QMessageBox.information(
+                    self,
+                    "No Black Pixels",
+                    f"No pixels found in black threshold range [{min_value}, {max_value}].\n"
+                    "Try adjusting the min/max values."
+                )
+                return
+            
+            # Add as a new selected object
+            object_id = str(uuid.uuid4())
+            self.selected_objects.append({
+                'id': object_id,
+                'mask': black_mask,
+                'label': 'Black Threshold',
+                'slice_index': self.current_image_index,
+            })
+            
+            # Track the slice where mask was selected
+            if self.mask_selected_slice_index is None:
+                self.mask_selected_slice_index = self.current_image_index
+            
+            # Update UI
+            self._update_objects_table()
+            self._update_combined_mask()
+            self.clear_selection_btn.setEnabled(True)
+            self.update_preview()
+            
+            QMessageBox.information(
+                self,
+                "Black Threshold Selected",
+                f"Selected {np.sum(black_mask)} pixels in black threshold range [{min_value}, {max_value}].\n"
+                "These pixels will be removed from ALL slices during preprocessing."
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Error selecting black threshold: {str(e)}"
+            )
+    
     def update_preview(self) -> None:
         """Update the before/after preview images."""
         if not self.image_paths:
@@ -1164,8 +1489,23 @@ class PreprocessWizard(QWidget):
             # Store original image for object detection (without rotation)
             self.before_label.set_original_image(original_rgb)
             
-            # Display original
-            original_pixmap = self.numpy_to_qpixmap(original_rgb)
+            # If visualizing black threshold, highlight those pixels
+            if self.visualizing_black_threshold:
+                min_value = self.black_threshold_min_spin.value()
+                max_value = self.black_threshold_max_spin.value()
+                black_mask = self._get_black_threshold_mask(original_rgb, min_value, max_value)
+                
+                # Create highlighted version
+                highlighted_rgb = original_rgb.copy()
+                # Highlight black pixels in yellow
+                highlighted_rgb[black_mask, 0] = np.minimum(255, highlighted_rgb[black_mask, 0] + 100)
+                highlighted_rgb[black_mask, 1] = np.minimum(255, highlighted_rgb[black_mask, 1] + 100)
+                highlighted_rgb[black_mask, 2] = highlighted_rgb[black_mask, 2]  # Keep blue low for yellow tint
+                
+                original_pixmap = self.numpy_to_qpixmap(highlighted_rgb)
+            else:
+                # Display original
+                original_pixmap = self.numpy_to_qpixmap(original_rgb)
             # Scale to fit label while maintaining aspect ratio
             # Use actual size if available, otherwise use minimum size
             label_size = self.before_label.size()
@@ -1193,58 +1533,98 @@ class PreprocessWizard(QWidget):
             self.before_label.update()  # Force immediate repaint
 
             # Process image with current settings
-            # Combine all selected object masks for this preview
-            combined_mask = None
-            if self.selected_objects:
-                # Use mask from first object as base (they should all be same size)
-                if self.selected_objects[0]['mask'] is not None:
-                    combined_mask = np.zeros_like(self.selected_objects[0]['mask'], dtype=bool)
-                    for obj in self.selected_objects:
-                        if obj['mask'] is not None:
-                            combined_mask = combined_mask | obj['mask']
+            # Get all modification objects
+            removal_objects = [obj for obj in self.selected_objects if obj.get('type') == 'Selection removal' and obj.get('mask') is not None]
+            crop_objects = [obj for obj in self.selected_objects if obj.get('type') == 'Crop' and obj.get('mask') is not None]
+            non_grayscale_objects = [obj for obj in self.selected_objects if obj.get('type') == 'Remove non-grayscale']
             
-            # For preview: only apply mask if this is the slice where it was selected
-            # Propagation across slices will be computed during full preprocessing
+            # Combine object removal masks that apply to current slice
+            # Make it more aggressive by always applying masks within their slice range
+            combined_mask = None
             apply_mask_in_preview = False
-            if combined_mask is not None and self.mask_selected_slice_index is not None:
-                # Only apply mask if viewing the slice where it was selected
-                if self.current_image_index == self.mask_selected_slice_index:
+            if removal_objects:
+                # Check which removal objects apply to current slice
+                applicable_removals = []
+                for obj in removal_objects:
+                    slice_min = obj.get('slice_min', 0)
+                    slice_max = obj.get('slice_max', len(self.image_paths) - 1)
+                    if slice_min <= self.current_image_index <= slice_max:
+                        applicable_removals.append(obj)
+                
+                if applicable_removals:
+                    # Combine masks from applicable removals
+                    combined_mask = np.zeros_like(applicable_removals[0]['mask'], dtype=bool)
+                    for obj in applicable_removals:
+                        if obj['mask'] is not None:
+                            # Dilate mask slightly to be more aggressive and catch nearby pixels
+                            from scipy import ndimage
+                            dilated_mask = ndimage.binary_dilation(obj['mask'], iterations=3)
+                            combined_mask = combined_mask | dilated_mask
                     apply_mask_in_preview = True
             
             # Apply rotation to original for processing preview (rotation only affects "after" preview)
             rotated_rgb = images.rotate_image_rgb(original_rgb, self.image_rotation)
             
-            # Process single slice (no propagation in preview for performance)
+            # Apply crop masks if specified (set pixels outside mask to black)
+            # Check if current slice is in any crop's range
+            for crop_obj in [obj for obj in self.selected_objects if obj.get('type') == 'Crop' and obj.get('mask') is not None]:
+                crop_mask = crop_obj.get('mask')
+                slice_min = crop_obj.get('slice_min', 0)
+                slice_max = crop_obj.get('slice_max', len(self.image_paths) - 1)
+                if slice_min <= self.current_image_index <= slice_max:
+                    # Apply this crop mask
+                    rotated_rgb = rotated_rgb.copy()
+                    rotated_rgb[~crop_mask] = [0, 0, 0]
+            
+            # Also apply current crop mask if being drawn
+            if self.current_crop_mask is not None:
+                rotated_rgb = rotated_rgb.copy()
+                rotated_rgb[~self.current_crop_mask] = [0, 0, 0]
+            
+            # Check if non-grayscale removal applies to current slice
+            apply_non_grayscale = False
+            if non_grayscale_objects:
+                for obj in non_grayscale_objects:
+                    slice_min = obj.get('slice_min', 0)
+                    slice_max = obj.get('slice_max', len(self.image_paths) - 1)
+                    if slice_min <= self.current_image_index <= slice_max:
+                        apply_non_grayscale = True
+                        break
+            
+            # Process single slice - always apply masks aggressively within their slice range
+            # Create object_removal_objects list for this specific slice
+            slice_removal_objects = None
+            if apply_mask_in_preview and removal_objects:
+                # Filter removal objects to only those that apply to current slice
+                slice_removal_objects = []
+                for obj in removal_objects:
+                    slice_min = obj.get('slice_min', 0)
+                    slice_max = obj.get('slice_max', len(self.image_paths) - 1)
+                    if slice_min <= self.current_image_index <= slice_max:
+                        # Create a copy with dilated mask for more aggressive removal
+                        from scipy import ndimage
+                        dilated_obj = obj.copy()
+                        if dilated_obj['mask'] is not None:
+                            dilated_obj['mask'] = ndimage.binary_dilation(dilated_obj['mask'], iterations=3)
+                        slice_removal_objects.append(dilated_obj)
+            
             processed_rgb = images.preprocess_volume_rgb(
                 np.expand_dims(rotated_rgb, axis=0),  # Add Z dimension
-                grayscale_tolerance=self.gray_spin.value(),
+                grayscale_tolerance=self.black_threshold_max_spin.value(),  # Use max as tolerance for overlay removal
                 saturation_threshold=self.sat_spin.value(),
                 remove_bed=False,  # Removed - use object selection instead
-                remove_non_grayscale=self.remove_non_grayscale_cb.isChecked(),
+                remove_non_grayscale=apply_non_grayscale,
                 object_mask=combined_mask if apply_mask_in_preview else None,
                 object_mask_slice_index=0 if apply_mask_in_preview else None,
+                non_grayscale_slice_ranges=[(0, 0)] if apply_non_grayscale else None,  # Single slice for preview
+                object_removal_objects=slice_removal_objects,  # Always pass applicable removals with dilated masks
             )
             processed_rgb = processed_rgb[0]  # Remove Z dimension
 
             # Display processed
             processed_pixmap = self.numpy_to_qpixmap(processed_rgb)
             
-            # Add note about propagation if mask exists but not on selected slice
-            if combined_mask is not None and self.mask_selected_slice_index is not None:
-                if self.current_image_index != self.mask_selected_slice_index:
-                    # Create overlay text on the pixmap
-                    from PySide6.QtGui import QPainter, QFont
-                    painter = QPainter(processed_pixmap)
-                    painter.setPen(QColor(255, 255, 0))  # Yellow text
-                    font = QFont()
-                    font.setPointSize(12)
-                    font.setBold(True)
-                    painter.setFont(font)
-                    painter.drawText(
-                        10, 30,
-                        "Note: Mask propagation will be applied during\nfull preprocessing"
-                    )
-                    painter.end()
+            # Note: Removed yellow warning text as it's outdated
             # Scale to fit label while maintaining aspect ratio
             # Use actual size if available, otherwise use minimum size
             label_size = self.after_label.size()
@@ -1313,19 +1693,99 @@ class PreprocessWizard(QWidget):
                     "Please select an input folder with images first.",
                 )
                 return
+            # Disable crop mode if active
+            if self.crop_mode:
+                self.toggle_crop_mode()
             self.selection_mode = True
             self.select_objects_btn.setText("Stop Selection Mode")
             if hasattr(self, 'before_label') and isinstance(self.before_label, SelectableImageLabel):
                 self.before_label.set_tool_mode(self.tool_mode)
+    
+    def toggle_crop_mode(self) -> None:
+        """Toggle crop selection mode for drawing crop masks."""
+        if self.crop_mode:
+            # Disable crop mode
+            self.crop_mode = False
+            self.current_crop_mask = None
+            self.start_crop_btn.setText("Start Crop Selection")
+            self.add_crop_btn.setEnabled(False)
+            self.cancel_crop_btn.setEnabled(False)
+            self.before_label.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            # Enable crop mode
+            if not self.image_paths:
+                QMessageBox.warning(
+                    self,
+                    "No Images",
+                    "Please select an input folder with images first.",
+                )
+                return
+            # Disable object selection mode if active
+            if self.selection_mode:
+                self.toggle_selection_mode()
+            self.crop_mode = True
+            self.start_crop_btn.setText("Stop Crop Selection")
+            self.cancel_crop_btn.setEnabled(True)
+            if hasattr(self, 'before_label') and isinstance(self.before_label, SelectableImageLabel):
+                self.before_label.set_tool_mode(self.tool_mode)
+    
+    def cancel_crop(self) -> None:
+        """Cancel the current crop selection and exit crop mode."""
+        self.current_crop_mask = None
+        if self.crop_mode:
+            self.toggle_crop_mode()  # This will exit crop mode and disable buttons
+        self.update_preview()
+    
+    def _on_non_grayscale_toggled(self, checked: bool) -> None:
+        """Handle non-grayscale removal checkbox toggle."""
+        if not self.image_paths:
+            return
+        
+        num_slices = len(self.image_paths)
+        
+        if checked:
+            # Add to table if not already there
+            existing = next((obj for obj in self.selected_objects if obj.get('type') == 'Remove non-grayscale'), None)
+            if existing is None:
+                non_grayscale_obj = {
+                    'id': str(uuid.uuid4()),
+                    'mask': None,  # No mask needed for this type
+                    'label': 'Remove non-grayscale',
+                    'type': 'Remove non-grayscale',
+                    'slice_index': 0,
+                    'slice_min': 0,  # Default: apply to all slices
+                    'slice_max': num_slices - 1,  # Default: apply to all slices
+                }
+                self.selected_objects.append(non_grayscale_obj)
+                self._update_objects_table()
+        else:
+            # Remove from table
+            self.selected_objects = [obj for obj in self.selected_objects if obj.get('type') != 'Remove non-grayscale']
+            self._update_objects_table()
+        
+        self.update_preview()
 
     def on_object_selected(self, mask: np.ndarray, object_id: str) -> None:
         """Handle when an object is selected."""
+        # Check if we're in crop mode
+        if self.crop_mode:
+            # This is a crop selection, not an object removal selection
+            self.current_crop_mask = mask
+            self.start_crop_btn.setText("Stop Crop Selection")
+            self.add_crop_btn.setEnabled(True)  # Enable add crop button
+            self.update_preview()
+            return
+        
         # Add to selected objects list with default label
+        num_slices = len(self.image_paths) if self.image_paths else 1
         obj = {
             'id': object_id,
             'mask': mask,
             'label': 'Other',  # Default label
+            'type': 'Selection removal',
             'slice_index': self.current_image_index,  # Track which slice this was selected on
+            'slice_min': 0,  # Default: apply to all slices (0-based)
+            'slice_max': num_slices - 1,  # Default: apply to all slices (0-based, inclusive)
         }
         self.selected_objects.append(obj)
         
@@ -1342,29 +1802,144 @@ class PreprocessWizard(QWidget):
         
         # Enable clear button
         self.clear_selection_btn.setEnabled(True)
+    
+    def add_crop_to_table(self) -> None:
+        """Add the current crop mask to the modifications table."""
+        if self.current_crop_mask is None:
+            return
+        
+        if not self.image_paths:
+            return
+        
+        num_slices = len(self.image_paths)
+        # Default slice range: all slices
+        crop_obj = {
+            'id': str(uuid.uuid4()),
+            'mask': self.current_crop_mask,
+            'label': 'Crop',
+            'type': 'Crop',
+            'slice_index': self.current_image_index,
+            'slice_min': 0,  # Default: apply to all slices (0-based)
+            'slice_max': num_slices - 1,  # Default: apply to all slices (0-based, inclusive)
+        }
+        self.selected_objects.append(crop_obj)
+        
+        # Clear current crop mask and disable add/cancel buttons
+        self.current_crop_mask = None
+        self.add_crop_btn.setEnabled(False)
+        self.cancel_crop_btn.setEnabled(False)
+        if self.crop_mode:
+            self.toggle_crop_mode()  # Exit crop mode
+        
+        # Update table and preview
+        self._update_objects_table()
+        self.update_preview()
+        self.clear_selection_btn.setEnabled(True)
         
     def _update_objects_table(self) -> None:
-        """Update the selected objects table."""
+        """Update the modifications table."""
         self.objects_table.setRowCount(len(self.selected_objects))
         
-        label_options = ["Bed", "Headrest", "Writing", "Logo", "Other"]
+        if not self.image_paths:
+            num_slices = 1
+        else:
+            num_slices = len(self.image_paths)
+        
+        label_options = ["Bed", "Headrest", "Writing", "Logo", "Other", "Crop"]
         
         for row, obj in enumerate(self.selected_objects):
-            # Label combo box
-            label_combo = QComboBox()
-            label_combo.addItems(label_options)
-            label_combo.setCurrentText(obj['label'])
-            label_combo.currentTextChanged.connect(
-                lambda text, obj_id=obj['id']: self._update_object_label(obj_id, text)
+            # Type (read-only label)
+            type_item = QTableWidgetItem(obj.get('type', 'Selection removal'))
+            type_item.setFlags(type_item.flags() & ~Qt.ItemIsEditable)
+            self.objects_table.setItem(row, 0, type_item)
+            
+            # Label combo box or text
+            if obj.get('type') == 'Crop':
+                label_item = QTableWidgetItem(obj.get('label', 'Crop'))
+                self.objects_table.setItem(row, 1, label_item)
+            else:
+                label_combo = QComboBox()
+                label_combo.addItems(label_options)
+                label_combo.setCurrentText(obj.get('label', 'Other'))
+                label_combo.currentTextChanged.connect(
+                    lambda text, obj_id=obj['id']: self._update_object_label(obj_id, text)
+                )
+                self.objects_table.setCellWidget(row, 1, label_combo)
+            
+            # Slice Min (editable spinbox)
+            slice_min_spin = QSpinBox()
+            slice_min_spin.setRange(1, num_slices)
+            slice_min_spin.setValue(obj.get('slice_min', 0) + 1)  # Convert to 1-based for display
+            slice_min_spin.setToolTip("First slice where this modification applies (1-based)")
+            slice_min_spin.valueChanged.connect(
+                lambda val, obj_id=obj['id']: self._update_object_slice_min(obj_id, val - 1)  # Convert back to 0-based
             )
-            self.objects_table.setCellWidget(row, 0, label_combo)
+            self.objects_table.setCellWidget(row, 2, slice_min_spin)
+            
+            # Slice Max (editable spinbox)
+            slice_max_spin = QSpinBox()
+            slice_max_spin.setRange(1, num_slices)
+            slice_max_spin.setValue(obj.get('slice_max', num_slices - 1) + 1)  # Convert to 1-based for display
+            slice_max_spin.setToolTip("Last slice where this modification applies (1-based, inclusive)")
+            slice_max_spin.valueChanged.connect(
+                lambda val, obj_id=obj['id']: self._update_object_slice_max(obj_id, val - 1)  # Convert back to 0-based
+            )
+            self.objects_table.setCellWidget(row, 3, slice_max_spin)
             
             # Delete button
             delete_btn = QPushButton("Delete")
             delete_btn.clicked.connect(
                 lambda checked, obj_id=obj['id']: self._delete_object(obj_id)
             )
-            self.objects_table.setCellWidget(row, 1, delete_btn)
+            self.objects_table.setCellWidget(row, 4, delete_btn)
+    
+    def _on_table_cell_changed(self, row: int, column: int) -> None:
+        """Handle cell changes in the table."""
+        if row >= len(self.selected_objects):
+            return
+        
+        obj = self.selected_objects[row]
+        
+        if column == 1:  # Label column
+            item = self.objects_table.item(row, column)
+            if item is not None:
+                obj['label'] = item.text()
+    
+    def _update_object_slice_min(self, object_id: str, slice_min: int) -> None:
+        """Update the minimum slice for an object."""
+        for obj in self.selected_objects:
+            if obj['id'] == object_id:
+                obj['slice_min'] = slice_min
+                # Ensure min <= max
+                if slice_min > obj.get('slice_max', 0):
+                    obj['slice_max'] = slice_min
+                    # Update the spinbox in the table
+                    row = next((i for i, o in enumerate(self.selected_objects) if o['id'] == object_id), -1)
+                    if row >= 0:
+                        max_spin = self.objects_table.cellWidget(row, 3)
+                        if max_spin is not None:
+                            max_spin.blockSignals(True)
+                            max_spin.setValue(slice_min + 1)  # Convert to 1-based
+                            max_spin.blockSignals(False)
+                break
+    
+    def _update_object_slice_max(self, object_id: str, slice_max: int) -> None:
+        """Update the maximum slice for an object."""
+        for obj in self.selected_objects:
+            if obj['id'] == object_id:
+                obj['slice_max'] = slice_max
+                # Ensure min <= max
+                if slice_max < obj.get('slice_min', 0):
+                    obj['slice_min'] = slice_max
+                    # Update the spinbox in the table
+                    row = next((i for i, o in enumerate(self.selected_objects) if o['id'] == object_id), -1)
+                    if row >= 0:
+                        min_spin = self.objects_table.cellWidget(row, 2)
+                        if min_spin is not None:
+                            min_spin.blockSignals(True)
+                            min_spin.setValue(slice_max + 1)  # Convert to 1-based
+                            min_spin.blockSignals(False)
+                break
             
     def _update_object_label(self, object_id: str, label: str) -> None:
         """Update the label for a selected object."""
@@ -1504,6 +2079,35 @@ class PreprocessWizard(QWidget):
         dialog = AutoDetectSettingsDialog(self, self.auto_detect_params)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.auto_detect_params.update(dialog.get_params())
+    
+    def _on_black_threshold_min_changed(self) -> None:
+        """Handle black threshold min value change - ensure min <= max and update preview."""
+        min_val = self.black_threshold_min_spin.value()
+        max_val = self.black_threshold_max_spin.value()
+        if min_val > max_val:
+            # Auto-adjust max to be at least equal to min
+            self.black_threshold_max_spin.blockSignals(True)
+            self.black_threshold_max_spin.setValue(min_val)
+            self.black_threshold_max_spin.blockSignals(False)
+        self._on_black_threshold_changed()
+    
+    def _on_black_threshold_max_changed(self) -> None:
+        """Handle black threshold max value change - ensure min <= max and update preview."""
+        min_val = self.black_threshold_min_spin.value()
+        max_val = self.black_threshold_max_spin.value()
+        if max_val < min_val:
+            # Auto-adjust min to be at most equal to max
+            self.black_threshold_min_spin.blockSignals(True)
+            self.black_threshold_min_spin.setValue(max_val)
+            self.black_threshold_min_spin.blockSignals(False)
+        self._on_black_threshold_changed()
+    
+    def _on_black_threshold_changed(self) -> None:
+        """Handle black threshold value change - update preview if visualizing."""
+        if self.visualizing_black_threshold:
+            self.update_preview()
+        else:
+            self.update_preview()  # Still update normal preview
     
     def rotate_images(self, angle: int) -> None:
         """

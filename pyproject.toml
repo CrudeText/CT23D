@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ct23d"
-version = "0.1.0"
+version = "0.3.0"
 description = "Convert CT slices to 3D meshes with preprocessing and GUI tools."
 authors = [{ name = "William Arranz" }]
 readme = "README.md"

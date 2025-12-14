@@ -47,6 +47,11 @@ def generate_uniform_bins(cfg: MeshingConfig) -> List[IntensityBin]:
         # Ensure at least width 1
         if high <= low:
             high = low + 1
+        # Ensure minimum intensity is at least 1 (0 is typically background/air)
+        if low < 1:
+            low = 1
+            if high <= low:
+                high = low + 1
         bins.append(
             IntensityBin(
                 index=idx,

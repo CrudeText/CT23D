@@ -80,7 +80,10 @@ def clean_bin_mask(
 ) -> np.ndarray:
     """
     Clean a per-bin mask via connected-component analysis.
-
+    
+    This function removes small isolated regions (noise) from the mask.
+    It should only be called when enable_component_filtering is True.
+    
     If cfg.adaptive_component_filtering is True:
       - Find the largest connected component size L.
       - Compute an effective min size:
@@ -89,6 +92,11 @@ def clean_bin_mask(
 
     Otherwise:
       - Remove components smaller than cfg.min_component_size.
+    
+    Note: This function is only called when cfg.enable_component_filtering is True.
+    If you're seeing surface loss with component filtering disabled, check:
+    1. That enable_component_filtering is actually False in your config
+    2. That Gaussian smoothing isn't removing the surfaces (see smooth_mask docstring)
     """
     if bin_mask.ndim != 3:
         raise ValueError(
@@ -122,6 +130,16 @@ def smooth_mask(
     Smooth a binary mask using a Gaussian filter and re-threshold at 0.5.
 
     This is mainly to make the isosurface from marching cubes smoother.
+    
+    WARNING: Gaussian smoothing can remove small objects and thin connections!
+    - Small isolated objects may disappear if their blurred values drop below 0.5
+    - Thin connections between larger objects can be broken
+    - Use with caution if you need to preserve fine details or small structures
+    
+    If you're experiencing surface loss, try:
+    1. Disabling Gaussian smoothing (set enable_smoothing=False)
+    2. Reducing the sigma value (smaller sigma = less blur = less surface loss)
+    3. Disabling component filtering if small objects are being removed
 
     Parameters
     ----------
@@ -129,6 +147,7 @@ def smooth_mask(
         Boolean mask [Z, Y, X].
     sigma:
         Standard deviation for Gaussian smoothing (in voxels).
+        Larger values = more blur = smoother surfaces but more surface loss.
 
     Returns
     -------
@@ -151,6 +170,7 @@ def extract_mesh(
     mask: np.ndarray,
     volume_color: Optional[np.ndarray],
     cfg: MeshingConfig,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Extract a surface mesh from a binary mask using marching cubes.
@@ -188,6 +208,9 @@ def extract_mesh(
 
     # marching_cubes expects values, not booleans
     vol_f = mask.astype(np.float32)
+    
+    if progress_callback:
+        progress_callback(0, 3)  # Step 1: Starting marching cubes
 
     # Run marching cubes in voxel coordinates (spacing=1,1,1)
     verts_vox, faces, _normals, _values = measure.marching_cubes(
@@ -195,6 +218,9 @@ def extract_mesh(
         level=0.5,
         spacing=(1.0, 1.0, 1.0),
     )
+    
+    if progress_callback:
+        progress_callback(1, 3)  # Step 2: Marching cubes complete
 
     # Sample colors if volume_color is provided
     colors = None
@@ -211,6 +237,9 @@ def extract_mesh(
         x_idx = np.clip(np.round(verts_vox[:, 2]).astype(int), 0, xmax - 1)
 
         colors = volume_color[z_idx, y_idx, x_idx].astype(np.uint8)
+    
+    if progress_callback:
+        progress_callback(2, 3)  # Step 3: Colors sampled
 
     # Scale to physical units using cfg.spacing = (z, y, x)
     sz, sy, sx = cfg.spacing
@@ -226,6 +255,7 @@ def save_mesh_ply(
     faces: np.ndarray,
     colors: Optional[np.ndarray] = None,
     opacity: Optional[float] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """
     Save a mesh as an ASCII PLY file with optional per-vertex RGB colors and opacity.
@@ -266,41 +296,236 @@ def save_mesh_ply(
             raise ValueError(f"opacity must be between 0.0 and 1.0, got {opacity}")
         alpha_value = int(opacity * 255)
 
+    # Estimate file size for progress tracking
+    # Header: ~300 bytes
+    # Vertex line: ~40-50 bytes (with colors/opacity), ~30 bytes (without)
+    # Face line: ~15-20 bytes
+    header_size = 300
+    if has_colors and has_opacity:
+        vertex_line_size = 50
+    elif has_colors or has_opacity:
+        vertex_line_size = 45
+    else:
+        vertex_line_size = 30
+    face_line_size = 18
+    
+    estimated_total_size = header_size + (n_verts * vertex_line_size) + (n_faces * face_line_size)
+    
+    if progress_callback:
+        progress_callback(0, estimated_total_size)  # Start: header
+    
     with path.open("w", encoding="utf-8") as f:
+        bytes_written = 0
+        
         # Header
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"element vertex {n_verts}\n")
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
+        header_lines = [
+            "ply\n",
+            "format ascii 1.0\n",
+            f"element vertex {n_verts}\n",
+            "property float x\n",
+            "property float y\n",
+            "property float z\n",
+        ]
         if has_colors:
-            f.write("property uchar red\n")
-            f.write("property uchar green\n")
-            f.write("property uchar blue\n")
+            header_lines.extend([
+                "property uchar red\n",
+                "property uchar green\n",
+                "property uchar blue\n",
+            ])
         if has_opacity:
-            f.write("property uchar alpha\n")
-        f.write(f"element face {n_faces}\n")
-        f.write("property list uchar int vertex_indices\n")
-        f.write("end_header\n")
-
-        # Vertices
+            header_lines.append("property uchar alpha\n")
+        header_lines.extend([
+            f"element face {n_faces}\n",
+            "property list uchar int vertex_indices\n",
+            "end_header\n",
+        ])
+        
+        for line in header_lines:
+            f.write(line)
+            bytes_written += len(line.encode('utf-8'))
+        
+        if progress_callback:
+            # The callback will check for cancellation and raise InterruptedError if needed
+            progress_callback(bytes_written, estimated_total_size)
+        
+        # Vertices - write in batches and report progress
+        batch_size = max(1000, n_verts // 100)  # Update progress every 1% or every 1000 vertices
         if has_colors and has_opacity:
-            for (x, y, z), (r, g, b) in zip(vertices, colors):
+            for i, ((x, y, z), (r, g, b)) in enumerate(zip(vertices, colors)):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)} {alpha_value}\n")
+                bytes_written += 50  # Approximate
+                if progress_callback and (i + 1) % batch_size == 0:
+                    # The callback will check for cancellation and raise InterruptedError if needed
+                    progress_callback(bytes_written, estimated_total_size)
         elif has_colors:
-            for (x, y, z), (r, g, b) in zip(vertices, colors):
+            for i, ((x, y, z), (r, g, b)) in enumerate(zip(vertices, colors)):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)}\n")
+                bytes_written += 45  # Approximate
+                if progress_callback and (i + 1) % batch_size == 0:
+                    # The callback will check for cancellation and raise InterruptedError if needed
+                    progress_callback(bytes_written, estimated_total_size)
         elif has_opacity:
-            for x, y, z in vertices:
+            for i, (x, y, z) in enumerate(vertices):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f} {alpha_value}\n")
+                bytes_written += 40  # Approximate
+                if progress_callback and (i + 1) % batch_size == 0:
+                    # The callback will check for cancellation and raise InterruptedError if needed
+                    progress_callback(bytes_written, estimated_total_size)
         else:
-            for x, y, z in vertices:
+            for i, (x, y, z) in enumerate(vertices):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
+                bytes_written += 30  # Approximate
+                if progress_callback and (i + 1) % batch_size == 0:
+                    # The callback will check for cancellation and raise InterruptedError if needed
+                    progress_callback(bytes_written, estimated_total_size)
 
-        # Faces
-        for a, b, c in faces:
+        # Faces - write in batches and report progress
+        face_batch_size = max(1000, n_faces // 100)  # Update progress every 1% or every 1000 faces
+        for i, (a, b, c) in enumerate(faces):
             f.write(f"3 {int(a)} {int(b)} {int(c)}\n")
+            bytes_written += 18  # Approximate
+            if progress_callback and (i + 1) % face_batch_size == 0:
+                # The callback will check for cancellation and raise InterruptedError if needed
+                progress_callback(bytes_written, estimated_total_size)
+        
+        if progress_callback:
+            # The callback will check for cancellation and raise InterruptedError if needed
+            progress_callback(estimated_total_size, estimated_total_size)  # Complete
+        
+        # Explicitly flush and sync the file to ensure it's written and released on Windows
+        f.flush()
+        import os
+        try:
+            os.fsync(f.fileno())
+        except (OSError, AttributeError):
+            # Some file systems don't support fsync, or file might not have fileno
+            pass
+        # The 'with' statement will close the file here, releasing the handle
+
+
+def save_mesh_stl(
+    path: Path,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    binary: bool = True,
+) -> None:
+    """
+    Save a mesh as an STL file (binary or ASCII format).
+    
+    STL format does not support colors or opacity - it only stores geometry.
+    Binary format is more compact and faster to write/read.
+    
+    Parameters
+    ----------
+    path:
+        Destination file path.
+    vertices:
+        Array [N, 3] of float vertices.
+    faces:
+        Array [M, 3] of int vertex indices.
+    binary:
+        If True, save as binary STL (default, faster and smaller).
+        If False, save as ASCII STL (human-readable).
+    """
+    import struct
+    
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    n_verts = vertices.shape[0]
+    n_faces = faces.shape[0]
+    
+    if binary:
+        # Binary STL format
+        with path.open("wb") as f:
+            # 80-byte header (usually contains description, but we'll leave it empty)
+            header = b"CT23D STL Export" + b"\x00" * (80 - 16)
+            f.write(header)
+            
+            # Number of triangles (4 bytes, unsigned int)
+            f.write(struct.pack("<I", n_faces))
+            
+            # For each triangle:
+            # - Normal vector (3 floats, 12 bytes) - we'll compute it
+            # - Vertex 1 (3 floats, 12 bytes)
+            # - Vertex 2 (3 floats, 12 bytes)
+            # - Vertex 3 (3 floats, 12 bytes)
+            # - Attribute byte count (2 bytes, usually 0)
+            for face in faces:
+                # Get triangle vertices
+                v0 = vertices[face[0]]
+                v1 = vertices[face[1]]
+                v2 = vertices[face[2]]
+                
+                # Compute normal vector (cross product of two edges)
+                edge1 = v1 - v0
+                edge2 = v2 - v0
+                normal = np.cross(edge1, edge2)
+                norm = np.linalg.norm(normal)
+                if norm > 0:
+                    normal = normal / norm
+                else:
+                    normal = np.array([0.0, 0.0, 1.0])  # Default normal if degenerate
+                
+                # Write normal (3 floats)
+                f.write(struct.pack("<fff", float(normal[0]), float(normal[1]), float(normal[2])))
+                
+                # Write vertices (3 floats each)
+                f.write(struct.pack("<fff", float(v0[0]), float(v0[1]), float(v0[2])))
+                f.write(struct.pack("<fff", float(v1[0]), float(v1[1]), float(v1[2])))
+                f.write(struct.pack("<fff", float(v2[0]), float(v2[1]), float(v2[2])))
+                
+                # Attribute byte count (usually 0)
+                f.write(struct.pack("<H", 0))
+            
+            # Explicitly flush and sync the file to ensure it's written and released on Windows
+            f.flush()
+            import os
+            try:
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                # Some file systems don't support fsync, or file might not have fileno
+                pass
+    else:
+        # ASCII STL format
+        with path.open("w", encoding="utf-8") as f:
+            f.write("solid CT23D_STL_Export\n")
+            
+            for face in faces:
+                # Get triangle vertices
+                v0 = vertices[face[0]]
+                v1 = vertices[face[1]]
+                v2 = vertices[face[2]]
+                
+                # Compute normal vector
+                edge1 = v1 - v0
+                edge2 = v2 - v0
+                normal = np.cross(edge1, edge2)
+                norm = np.linalg.norm(normal)
+                if norm > 0:
+                    normal = normal / norm
+                else:
+                    normal = np.array([0.0, 0.0, 1.0])
+                
+                # Write facet
+                f.write(f"  facet normal {normal[0]:.6e} {normal[1]:.6e} {normal[2]:.6e}\n")
+                f.write("    outer loop\n")
+                f.write(f"      vertex {v0[0]:.6e} {v0[1]:.6e} {v0[2]:.6e}\n")
+                f.write(f"      vertex {v1[0]:.6e} {v1[1]:.6e} {v1[2]:.6e}\n")
+                f.write(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}\n")
+                f.write("    endloop\n")
+                f.write("  endfacet\n")
+            
+            f.write("endsolid CT23D_STL_Export\n")
+            
+            # Explicitly flush and sync the file to ensure it's written and released on Windows
+            f.flush()
+            import os
+            try:
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                # Some file systems don't support fsync, or file might not have fileno
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +542,8 @@ def generate_meshes_for_bins(
     global_mask: Optional[np.ndarray] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     phase_progress_callback: Optional[Callable[[str, int, int, int], None]] = None,
+    export_format: str = "PLY",
+    stl_binary: bool = True,  # For STL format: True=binary, False=ASCII
 ) -> List[Path]:
     """
     Generate meshes for a list of intensity bins.
@@ -380,13 +607,21 @@ def generate_meshes_for_bins(
     if phase_progress_callback:
         phase_progress_callback(phase, 0, phase_total, overall_total)
 
+    # Phase 1: Build all masks first
+    bin_masks = []
     for i, bin_ in enumerate(enabled_bins):
+        # Check for cancellation before each bin
+        if phase_progress_callback:
+            # Check if we should stop - this will be checked in the callback
+            pass
+        
         if progress_callback:
             progress_callback(i, total)
         
         if phase_progress_callback:
             phase_current = i + 1
-            overall_current = i
+            overall_current = i + 1
+            # The callback will check for cancellation and raise InterruptedError if needed
             phase_progress_callback(phase, phase_current, phase_total, overall_total)
 
         # 1) Build mask for this bin
@@ -394,6 +629,7 @@ def generate_meshes_for_bins(
 
         # Skip empty if configured
         if cfg.skip_empty_bins and np.count_nonzero(bin_mask) == 0:
+            bin_masks.append(None)
             continue
 
         # 2) Apply global mask if provided
@@ -407,37 +643,68 @@ def generate_meshes_for_bins(
 
         # After applying global mask, maybe it's empty
         if cfg.skip_empty_bins and np.count_nonzero(bin_mask) == 0:
+            bin_masks.append(None)
             continue
 
-        # 3) Clean small components
-        bin_mask_clean = clean_bin_mask(bin_mask, cfg)
+        # 3) Clean small components (if enabled)
+        if cfg.enable_component_filtering:
+            bin_mask_clean = clean_bin_mask(bin_mask, cfg)
+        else:
+            bin_mask_clean = bin_mask
 
         if cfg.skip_empty_bins and np.count_nonzero(bin_mask_clean) == 0:
+            bin_masks.append(None)
             continue
 
-        # 4) Smooth mask
-        bin_mask_smooth = smooth_mask(bin_mask_clean, cfg.smoothing_sigma)
+        # 4) Smooth mask (if enabled)
+        if cfg.enable_smoothing:
+            bin_mask_smooth = smooth_mask(bin_mask_clean, cfg.smoothing_sigma)
+        else:
+            bin_mask_smooth = bin_mask_clean
 
         if cfg.skip_empty_bins and np.count_nonzero(bin_mask_smooth) == 0:
+            bin_masks.append(None)
             continue
-
-        # Switch to extracting phase
-        if phase_progress_callback and i == 0:
-            phase = "Extracting meshes"
-            phase_current = 0
-            phase_total = total
-            phase_progress_callback(phase, 0, phase_total, overall_total)
         
-        # 5) Extract mesh
-        verts, faces, colors = extract_mesh(bin_mask_smooth, volume_color, cfg)
+        bin_masks.append(bin_mask_smooth)
+    
+    # Mark building masks phase as complete
+    if phase_progress_callback:
+        phase_progress_callback(phase, phase_total, phase_total, overall_total)
+    
+    # Phase 2: Extract all meshes
+    if phase_progress_callback:
+        phase = "Extracting meshes"
+        phase_current = 0
+        phase_total = total
+        overall_current = total
+        phase_progress_callback(phase, 0, phase_total, overall_total)
+    
+    # Store extracted meshes for saving phase
+    extracted_meshes = []
+    for i, (bin_, bin_mask_smooth) in enumerate(zip(enabled_bins, bin_masks)):
+        if bin_mask_smooth is None:
+            extracted_meshes.append(None)
+            continue
+        
+        # 5) Extract mesh (with progress callback to prevent freezing)
+        def extract_progress_cb(current: int, total: int) -> None:
+            # This helps keep UI responsive during long mesh extractions
+            if phase_progress_callback:
+                # Still report overall progress, but extract_mesh is doing its own sub-progress
+                pass
+        
+        verts, faces, colors = extract_mesh(bin_mask_smooth, volume_color, cfg, progress_callback=extract_progress_cb)
         
         if phase_progress_callback:
             phase_current = i + 1
-            overall_current = total + i
+            overall_current = total + i + 1
+            # The callback will check for cancellation and raise InterruptedError if needed
             phase_progress_callback(phase, phase_current, phase_total, overall_total)
 
         if verts.size == 0 or faces.size == 0:
             # No geometry produced (e.g. extremely small bin) – skip
+            extracted_meshes.append(None)
             continue
 
         # 6) Apply bin color if specified (override volume colors)
@@ -455,20 +722,37 @@ def generate_meshes_for_bins(
         elif colors is None:
             # If no colors from volume and no bin color, use default gray
             colors = np.full((verts.shape[0], 3), 128, dtype=np.uint8)
-
-        # Switch to saving phase
-        if phase_progress_callback and i == 0:
-            phase = "Saving files"
-            phase_current = 0
-            phase_total = total
-            phase_progress_callback(phase, 0, phase_total, overall_total)
+        
+        extracted_meshes.append((bin_, verts, faces, colors))
+    
+    # Mark extracting meshes phase as complete
+    if phase_progress_callback:
+        phase_progress_callback(phase, phase_total, phase_total, overall_total)
+    
+    # Phase 3: Save all files
+    if phase_progress_callback:
+        phase = "Saving files"
+        phase_current = 0
+        phase_total = len([m for m in extracted_meshes if m is not None])
+        overall_current = total * 2
+        phase_progress_callback(phase, 0, phase_total, overall_total)
+    
+    saved_count = 0
+    for mesh_data in extracted_meshes:
+        if mesh_data is None:
+            continue
+        
+        bin_, verts, faces, colors = mesh_data
         
         # 7) Save mesh (round intensity values to integers)
         low_int = int(round(bin_.low))
         high_int = int(round(bin_.high))
-        # Get file extension from output path or default to .ply
-        # The save function will be called with the correct path
-        ext = "ply"  # Default, will be overridden by format if needed
+        # Get file extension based on export format
+        format_upper = export_format.upper()
+        if format_upper == "STL":
+            ext = "stl"
+        else:  # Default to PLY
+            ext = "ply"
         fname = (
             f"{cfg.output_prefix}_bin_{bin_.index:02d}"
             f"_{low_int}_{high_int}.{ext}"
@@ -476,17 +760,38 @@ def generate_meshes_for_bins(
         out_path = output_dir / fname
         # Get opacity from config if available, otherwise None
         opacity = getattr(cfg, 'opacity', None)
-        save_mesh_ply(out_path, verts, faces, colors, opacity=opacity)
+        
+        # Create progress callback for file saving based on file size
+        def file_save_progress_cb(bytes_written: int, total_bytes: int) -> None:
+            if phase_progress_callback:
+                # Calculate progress within this file (0.0 to 1.0)
+                file_progress = bytes_written / max(total_bytes, 1)
+                # Calculate overall progress: previous files + this file's progress
+                # Each file contributes 1 to phase_total, so we need to scale file_progress
+                files_completed = saved_count
+                files_total = phase_total
+                if files_total > 0:
+                    overall_file_progress = (files_completed + file_progress) / files_total
+                    phase_current = int(overall_file_progress * files_total)
+                    overall_current = total * 2 + phase_current
+                    phase_progress_callback(phase, phase_current, phase_total, overall_total)
+        
+        if format_upper == "STL":
+            save_mesh_stl(out_path, verts, faces, binary=stl_binary)
+        else:  # PLY format
+            save_mesh_ply(out_path, verts, faces, colors, opacity=opacity, progress_callback=file_save_progress_cb)
         outputs.append(out_path)
+        saved_count += 1
         
         if phase_progress_callback:
-            phase_current = i + 1
-            overall_current = total * 2 + i
+            phase_current = saved_count
+            overall_current = total * 2 + saved_count
             phase_progress_callback(phase, phase_current, phase_total, overall_total)
     
     if progress_callback:
         progress_callback(total, total)
     
+    # Mark saving phase as complete
     if phase_progress_callback:
         phase_progress_callback(phase, phase_total, phase_total, overall_total)
 

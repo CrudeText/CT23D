@@ -726,6 +726,8 @@ def preprocess_volume_rgb(
     remove_non_grayscale: bool = False,
     object_mask: Optional[np.ndarray] = None,
     object_mask_slice_index: Optional[int] = None,
+    non_grayscale_slice_ranges: Optional[List[Tuple[int, int]]] = None,  # List of (min, max) slice ranges for non-grayscale removal
+    object_removal_objects: Optional[List[dict]] = None,  # List of objects with masks and slice ranges
     progress_cb: Optional[Callable[[str, int, int, int], None]] = None,
 ) -> np.ndarray:
     """
@@ -761,24 +763,58 @@ def preprocess_volume_rgb(
     
     # Initialize masks for all slices (None means no mask)
     slice_masks = [None] * len(volume_rgb)
+    # Track which slices need non-grayscale removal
+    non_grayscale_slices = set()
     
     # Track linear progress counter (1 to total_slices)
     total_slices = len(volume_rgb)
     progress_counter = 0
     
-    # If we have an object mask, apply it to ALL slices (simple approach - same coordinates)
-    # No complex propagation - just use the same mask coordinates for all slices
+    # Process object removal objects with their slice ranges
+    # Make it more aggressive by dilating masks to catch nearby pixels
+    if object_removal_objects:
+        from scipy import ndimage
+        for obj in object_removal_objects:
+            obj_mask = obj.get('mask')
+            slice_min = obj.get('slice_min', 0)
+            slice_max = obj.get('slice_max', total_slices - 1)
+            
+            if obj_mask is not None:
+                # Dilate mask to be more aggressive (catch nearby pixels)
+                dilated_mask = ndimage.binary_dilation(obj_mask, iterations=3)
+                
+                # Clamp slice range
+                slice_min = max(0, min(slice_min, total_slices - 1))
+                slice_max = max(slice_min, min(slice_max, total_slices - 1))
+                
+                # Apply dilated mask to slices in range
+                for z_idx in range(slice_min, slice_max + 1):
+                    if slice_masks[z_idx] is None:
+                        slice_masks[z_idx] = dilated_mask.copy()
+                    else:
+                        # Combine masks (union)
+                        slice_masks[z_idx] = slice_masks[z_idx] | dilated_mask
+    
+    # Legacy support: if object_mask is provided, apply to all slices
     if object_mask is not None:
-        # Just apply the same mask to all slices - no propagation needed
         for z_idx in range(len(volume_rgb)):
-            slice_masks[z_idx] = object_mask.copy()
-            # Report progress
-            if progress_cb is not None:
-                progress_counter += 1
-                try:
-                    progress_cb("processing", progress_counter, total_slices, total_slices)
-                except InterruptedError:
-                    raise  # Re-raise to stop processing
+            if slice_masks[z_idx] is None:
+                slice_masks[z_idx] = object_mask.copy()
+            else:
+                slice_masks[z_idx] = slice_masks[z_idx] | object_mask
+    
+    # Process non-grayscale removal slice ranges
+    if non_grayscale_slice_ranges:
+        for slice_min, slice_max in non_grayscale_slice_ranges:
+            slice_min = max(0, min(slice_min, total_slices - 1))
+            slice_max = max(slice_min, min(slice_max, total_slices - 1))
+            for z_idx in range(slice_min, slice_max + 1):
+                non_grayscale_slices.add(z_idx)
+    
+    # Legacy support: if remove_non_grayscale is True, apply to all slices
+    if remove_non_grayscale:
+        for z_idx in range(total_slices):
+            non_grayscale_slices.add(z_idx)
     
     # Now process all slices with their masks
     # This applies: overlay removal, non-grayscale removal, and object mask removal
@@ -790,9 +826,9 @@ def preprocess_volume_rgb(
                 progress_cb("processing", progress_counter, total_slices, total_slices)
             except InterruptedError:
                 raise  # Re-raise to stop processing
-        # Apply non-grayscale removal BEFORE overlay removal if enabled
+        # Apply non-grayscale removal BEFORE overlay removal if enabled for this slice
         # This ensures we catch all colored pixels before they get converted to grayscale
-        if remove_non_grayscale:
+        if z_idx in non_grayscale_slices:
             rgb = _remove_non_grayscale(rgb, threshold=saturation_threshold)
         
         cleaned = _remove_colored_overlays(

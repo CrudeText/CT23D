@@ -78,59 +78,12 @@ class MesherWizard(QWidget):
         top_row.addWidget(self.btn_select_processed)
         main_layout.addLayout(top_row)
 
-        # Meshing parameters group
-        params_group = QGroupBox("Meshing parameters")
-        params_layout = QGridLayout(params_group)
-
-        # Spacing
-        params_layout.addWidget(QLabel("Spacing (mm) Z / Y / X"), 0, 0)
-        self.spin_spacing_z = QDoubleSpinBox()
-        self.spin_spacing_y = QDoubleSpinBox()
-        self.spin_spacing_x = QDoubleSpinBox()
-        for sp in (self.spin_spacing_z, self.spin_spacing_y, self.spin_spacing_x):
-            sp.setRange(0.001, 1000.0)
-            sp.setDecimals(3)
-            sp.setSingleStep(0.1)
-        self.spin_spacing_z.setValue(1.6)
-        self.spin_spacing_y.setValue(1.0)
-        self.spin_spacing_x.setValue(1.0)
-
-        params_layout.addWidget(self.spin_spacing_z, 0, 1)
-        params_layout.addWidget(self.spin_spacing_y, 0, 2)
-        params_layout.addWidget(self.spin_spacing_x, 0, 3)
-
-        # Number of bins
-        params_layout.addWidget(QLabel("Number of bins:"), 1, 0)
-        self.spin_num_bins = QSpinBox()
-        self.spin_num_bins.setRange(1, 1024)
-        self.spin_num_bins.setValue(6)
-        params_layout.addWidget(self.spin_num_bins, 1, 1)
-
-        # Intensity range (integers)
-        params_layout.addWidget(QLabel("Intensity range min / max:"), 1, 2)
-        self.spin_int_min = QSpinBox()
-        self.spin_int_max = QSpinBox()
-        for sp in (self.spin_int_min, self.spin_int_max):
-            sp.setRange(0, 255)
-            sp.setSingleStep(1)
-        self.spin_int_min.setValue(1)
-        self.spin_int_max.setValue(255)
-
-        params_layout.addWidget(self.spin_int_min, 1, 3)
-        params_layout.addWidget(self.spin_int_max, 1, 4)
-
-        main_layout.addWidget(params_group)
-        
-        # Compute histogram button (moved here)
-        self.btn_load_volume = QPushButton("Compute histogram")
-        self.btn_load_volume.clicked.connect(self.load_volume_and_histogram)
-        main_layout.addWidget(self.btn_load_volume)
-
         # 3D Histogram + bin table + preview
         middle_layout = QHBoxLayout()
         
-        # Left: Histogram
-        self.histogram = Histogram3DView(self)
+        # Left: Histogram (tabbed view)
+        from ct23d.gui.mesher.histogram_tabbed_view import HistogramTabbedView
+        self.histogram = HistogramTabbedView(self)
         # Connect bin boundary changes to update table
         self.histogram.set_bin_boundary_callback(self._on_histogram_bin_moved)
         middle_layout.addWidget(self.histogram, stretch=3)
@@ -169,6 +122,7 @@ class MesherWizard(QWidget):
         
         # Continuous bins checkbox
         self.continuous_bins_cb = QCheckBox("Continuous bins")
+        self.continuous_bins_cb.setChecked(True)  # Enabled by default
         self.continuous_bins_cb.setToolTip(
             "When enabled, adjusting bin boundaries automatically adjusts adjacent bins to keep them continuous"
         )
@@ -198,7 +152,103 @@ class MesherWizard(QWidget):
         prefix_row.addWidget(self.edit_prefix)
         main_layout.addLayout(prefix_row)
 
-        # Export options group
+        # Options row: Mesh Processing Options (left) and Export Options (right)
+        options_row = QHBoxLayout()
+        
+        # Mesh processing options group (left side)
+        processing_group = QGroupBox("Mesh Processing Options")
+        processing_layout = QVBoxLayout(processing_group)
+        
+        # Component filtering option
+        component_row = QHBoxLayout()
+        self.enable_component_filtering_cb = QCheckBox("Enable component filtering")
+        self.enable_component_filtering_cb.setChecked(True)
+        self.enable_component_filtering_cb.setToolTip(
+            "Remove small isolated regions as noise. "
+            "Uncheck to preserve all details (may include noise)."
+        )
+        component_row.addWidget(self.enable_component_filtering_cb)
+        component_explanation = QLabel("(Removes small isolated regions as noise)")
+        component_explanation.setStyleSheet("color: gray; font-style: italic;")
+        component_explanation.setToolTip(
+            "Component filtering removes small connected regions that are likely noise. "
+            "Uncheck this to preserve all details, including potentially noisy small features."
+        )
+        component_row.addWidget(component_explanation)
+        component_row.addStretch()
+        processing_layout.addLayout(component_row)
+        
+        # Min component size (for noise filtering)
+        component_size_row = QHBoxLayout()
+        component_size_row.addWidget(QLabel("Min component size:"))
+        self.spin_min_component_size = QSpinBox()
+        self.spin_min_component_size.setRange(0, 1000000)
+        self.spin_min_component_size.setSingleStep(100)
+        self.spin_min_component_size.setValue(5000)
+        self.spin_min_component_size.setToolTip(
+            "Minimum connected component size (in voxels) to keep. "
+            "Smaller components are removed as noise. "
+            "Lower values preserve more detail but may keep noise. "
+            "Higher values remove more noise but may lose small features. "
+            "Default: 5000. For minimal loss, use 0-1000."
+        )
+        component_size_row.addWidget(self.spin_min_component_size)
+        component_size_row.addStretch()
+        processing_layout.addLayout(component_size_row)
+        
+        # Connect checkbox to enable/disable spinbox
+        self.enable_component_filtering_cb.toggled.connect(
+            lambda checked: self.spin_min_component_size.setEnabled(checked)
+        )
+        self.spin_min_component_size.setEnabled(True)  # Enabled by default since checkbox is checked
+
+        # Smoothing option
+        smoothing_row = QHBoxLayout()
+        self.enable_smoothing_cb = QCheckBox("Enable Gaussian smoothing")
+        self.enable_smoothing_cb.setChecked(True)
+        self.enable_smoothing_cb.setToolTip(
+            "Blur edges for smoother surfaces. "
+            "WARNING: Can remove small objects and thin connections! "
+            "Uncheck if you're experiencing surface loss."
+        )
+        smoothing_row.addWidget(self.enable_smoothing_cb)
+        smoothing_explanation = QLabel("(Blurs edges for smoother surfaces - may remove small objects)")
+        smoothing_explanation.setStyleSheet("color: gray; font-style: italic;")
+        smoothing_explanation.setToolTip(
+            "Gaussian smoothing can remove small isolated objects and break thin connections. "
+            "If you're seeing surface loss, try disabling this option."
+        )
+        smoothing_row.addWidget(smoothing_explanation)
+        smoothing_row.addStretch()
+        processing_layout.addLayout(smoothing_row)
+        
+        # Smoothing sigma (for noise reduction)
+        smoothing_sigma_row = QHBoxLayout()
+        smoothing_sigma_row.addWidget(QLabel("Smoothing sigma:"))
+        self.spin_smoothing_sigma = QDoubleSpinBox()
+        self.spin_smoothing_sigma.setRange(0.0, 10.0)
+        self.spin_smoothing_sigma.setDecimals(2)
+        self.spin_smoothing_sigma.setSingleStep(0.1)
+        self.spin_smoothing_sigma.setValue(1.0)
+        self.spin_smoothing_sigma.setToolTip(
+            "Gaussian smoothing strength (in voxels). "
+            "Lower values preserve more detail but may create jagged surfaces. "
+            "Higher values create smoother surfaces but may lose small details. "
+            "Default: 1.0. For minimal loss, use 0.0-0.5."
+        )
+        smoothing_sigma_row.addWidget(self.spin_smoothing_sigma)
+        smoothing_sigma_row.addStretch()
+        processing_layout.addLayout(smoothing_sigma_row)
+        
+        # Connect checkbox to enable/disable spinbox
+        self.enable_smoothing_cb.toggled.connect(
+            lambda checked: self.spin_smoothing_sigma.setEnabled(checked)
+        )
+        self.spin_smoothing_sigma.setEnabled(True)  # Enabled by default since checkbox is checked
+        
+        options_row.addWidget(processing_group, stretch=1)
+
+        # Export options group (right side)
         export_group = QGroupBox("Export Options")
         export_layout = QVBoxLayout(export_group)
         
@@ -207,6 +257,7 @@ class MesherWizard(QWidget):
         file_org_row.addWidget(QLabel("File organization:"))
         self.export_mode_combo = QComboBox()
         self.export_mode_combo.addItems(["Multiple files (one per bin)", "Single file (all bins combined)"])
+        # File size calculation is now manual only (button click)
         file_org_row.addWidget(self.export_mode_combo)
         file_org_row.addStretch()
         export_layout.addLayout(file_org_row)
@@ -215,11 +266,11 @@ class MesherWizard(QWidget):
         format_row = QHBoxLayout()
         format_row.addWidget(QLabel("Format:"))
         self.format_combo = QComboBox()
-        # Only PLY is currently implemented and working
-        self.format_combo.addItems(["PLY"])
+        # PLY and STL are implemented
+        self.format_combo.addItems(["PLY", "STL"])
         self.format_combo.setToolTip(
             "PLY: Supports per-vertex colors and opacity\n"
-            "Note: Other formats (OBJ, STL, GLTF) may be added in the future"
+            "STL: Geometry only (no colors/opacity), widely compatible"
         )
         format_row.addWidget(self.format_combo)
         format_row.addStretch()
@@ -232,17 +283,37 @@ class MesherWizard(QWidget):
         
         # Connect format change to update available options
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
+        # File size calculation is now manual only (button click)
         
         # Options checkboxes
-        options_row = QHBoxLayout()
+        export_options_row = QHBoxLayout()
         self.export_colors_cb = QCheckBox("Export with colors")
         self.export_colors_cb.setChecked(True)
+        # File size calculation is now manual only (button click)
         self.export_opacity_cb = QCheckBox("Export with opacity")
         self.export_opacity_cb.setChecked(False)
-        options_row.addWidget(self.export_colors_cb)
-        options_row.addWidget(self.export_opacity_cb)
-        options_row.addStretch()
-        export_layout.addLayout(options_row)
+        # File size calculation is now manual only (button click)
+        export_options_row.addWidget(self.export_colors_cb)
+        export_options_row.addWidget(self.export_opacity_cb)
+        export_options_row.addStretch()
+        export_layout.addLayout(export_options_row)
+        
+        # Format-specific options (STL binary/ASCII)
+        self.stl_format_row = QHBoxLayout()
+        self.stl_format_row.addWidget(QLabel("STL format:"))
+        self.stl_binary_cb = QCheckBox("Binary (faster, smaller)")
+        self.stl_binary_cb.setChecked(True)
+        self.stl_binary_cb.setToolTip(
+            "Binary STL: Faster to write/read, smaller file size (default)\n"
+            "ASCII STL: Human-readable, larger file size"
+        )
+        # File size calculation is now manual only (button click)
+        self.stl_format_row.addWidget(self.stl_binary_cb)
+        self.stl_format_row.addStretch()
+        export_layout.addLayout(self.stl_format_row)
+        # Initially hide STL options (only show for STL format)
+        self.stl_format_row.itemAt(0).widget().setVisible(False)
+        self.stl_binary_cb.setVisible(False)
         
         # Opacity value (only enabled if opacity checkbox is checked)
         opacity_row = QHBoxLayout()
@@ -258,7 +329,25 @@ class MesherWizard(QWidget):
         opacity_row.addStretch()
         export_layout.addLayout(opacity_row)
         
-        main_layout.addWidget(export_group)
+        # File size estimation
+        size_row = QHBoxLayout()
+        self.calc_size_btn = QPushButton("Calculate approximate file size")
+        self.calc_size_btn.setToolTip(
+            "Estimate the total file size based on current settings.\n"
+            "For multiple files: shows the sum of all files.\n"
+            "For single file: shows the size of that file."
+        )
+        self.calc_size_btn.clicked.connect(self._on_calculate_file_size_clicked)
+        size_row.addWidget(self.calc_size_btn)
+        self.size_label = QLabel("")
+        self.size_label.setStyleSheet("color: white; font-weight: bold;")
+        size_row.addWidget(self.size_label)
+        size_row.addStretch()
+        export_layout.addLayout(size_row)
+        
+        options_row.addWidget(export_group, stretch=1)
+        
+        main_layout.addLayout(options_row)
         
         # Export button
         self.btn_export_meshes = QPushButton("Export meshes")
@@ -266,6 +355,159 @@ class MesherWizard(QWidget):
         self.btn_export_meshes.setEnabled(False)
         main_layout.addWidget(self.btn_export_meshes)
 
+    # ------------------------------------------------------------------ #
+    # File size estimation
+    # ------------------------------------------------------------------ #
+    def _on_calculate_file_size_clicked(self) -> None:
+        """Handle button click to calculate file size in background thread."""
+        if self._volume is None:
+            self.size_label.setText("(Load volume first)")
+            self.size_label.setStyleSheet("color: red; font-weight: normal;")
+            return
+        
+        # Get current settings for the worker
+        bins = [b for b in self._collect_bins_from_table() if b.enabled]
+        if not bins:
+            self.size_label.setText("(No enabled bins)")
+            self.size_label.setStyleSheet("color: red; font-weight: normal;")
+            return
+        
+        export_mode_text = self.export_mode_combo.currentText()
+        export_mode = "separate" if "Multiple" in export_mode_text else "combined"
+        format_name = self.format_combo.currentText().upper()
+        export_colors = self.export_colors_cb.isChecked() and format_name == "PLY"
+        export_opacity = self.export_opacity_cb.isChecked() and format_name == "PLY"
+        stl_binary = self.stl_binary_cb.isChecked() if format_name == "STL" else True
+        
+        # Create worker function
+        volume = self._volume  # Capture volume for worker thread
+        def calculate_task(progress_cb) -> str:
+            return self._calculate_file_size_impl(
+                volume, bins, export_mode, format_name, export_colors, export_opacity, stl_binary, progress_cb
+            )
+        
+        # Run in background thread
+        from ct23d.gui.workers import FunctionWorker
+        worker = FunctionWorker(calculate_task, with_progress=True)
+        
+        def on_success(result: str) -> None:
+            self.size_label.setText(result)
+            self.size_label.setStyleSheet("color: white; font-weight: bold;")
+        
+        def on_error(msg: str) -> None:
+            self.size_label.setText(f"(Error: {msg})")
+            self.size_label.setStyleSheet("color: red; font-weight: normal;")
+        
+        self.status.run_threaded_with_progress(
+            worker,
+            title="Calculating file size...",
+            on_success=on_success,
+        )
+        worker.error.connect(on_error)
+    
+    def _calculate_file_size_impl(
+        self,
+        volume: np.ndarray,
+        bins: list,
+        export_mode: str,
+        format_name: str,
+        export_colors: bool,
+        export_opacity: bool,
+        stl_binary: bool,
+        progress_cb,
+    ) -> str:
+        """Calculate file size (runs in background thread)."""
+        try:
+            # Estimate mesh complexity from volume
+            volume_gray = volume.mean(axis=-1) if volume.ndim == 4 else volume
+            total_voxels = volume_gray.size
+            non_zero_voxels = np.count_nonzero(volume_gray)
+            
+            # Estimate vertices and faces per bin
+            # Marching cubes typically produces ~2 faces per surface voxel
+            # Each face has 3 vertices, but vertices are shared (~2 faces share 1 vertex)
+            # So roughly: vertices ≈ surface_voxels, faces ≈ 2 * surface_voxels
+            
+            total_estimated_size = 0
+            
+            if export_mode == "combined":
+                # Combined: estimate total mesh size
+                # Estimate surface voxels as a fraction of non-zero voxels
+                # This is a rough estimate - actual depends on bin ranges
+                estimated_surface_voxels = int(non_zero_voxels * 0.1)  # ~10% are on surface
+                estimated_vertices = estimated_surface_voxels
+                estimated_faces = estimated_surface_voxels * 2
+                
+                # Calculate file size
+                if format_name == "STL":
+                    if stl_binary:
+                        # Binary STL: 80 byte header + 4 bytes (face count) + 50 bytes per face
+                        total_estimated_size = 80 + 4 + (estimated_faces * 50)
+                    else:
+                        # ASCII STL: similar to PLY but simpler
+                        header_size = 100
+                        vertex_line_size = 30  # "vertex x y z\n"
+                        face_line_size = 20  # "facet normal ... endfacet\n"
+                        total_estimated_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
+                else:  # PLY
+                    header_size = 300
+                    if export_colors and export_opacity:
+                        vertex_line_size = 50
+                    elif export_colors or export_opacity:
+                        vertex_line_size = 45
+                    else:
+                        vertex_line_size = 30
+                    face_line_size = 18
+                    total_estimated_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
+            else:
+                # Separate: estimate size per bin and sum
+                total_bins = len(bins)
+                for i, bin_ in enumerate(bins):
+                    # Report progress
+                    progress_cb(i + 1, total_bins)
+                    
+                    # Estimate voxels in this bin range
+                    bin_mask = (volume_gray >= bin_.low) & (volume_gray < bin_.high)
+                    bin_voxels = np.count_nonzero(bin_mask)
+                    # Estimate surface voxels
+                    estimated_surface_voxels = int(bin_voxels * 0.1)  # ~10% are on surface
+                    estimated_vertices = estimated_surface_voxels
+                    estimated_faces = estimated_surface_voxels * 2
+                    
+                    # Calculate file size for this bin
+                    if format_name == "STL":
+                        if stl_binary:
+                            file_size = 80 + 4 + (estimated_faces * 50)
+                        else:
+                            header_size = 100
+                            vertex_line_size = 30
+                            face_line_size = 20
+                            file_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
+                    else:  # PLY
+                        header_size = 300
+                        if export_colors and export_opacity:
+                            vertex_line_size = 50
+                        elif export_colors or export_opacity:
+                            vertex_line_size = 45
+                        else:
+                            vertex_line_size = 30
+                        face_line_size = 18
+                        file_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
+                    
+                    total_estimated_size += file_size
+            
+            # Convert to MB and return
+            size_mb = total_estimated_size / (1024 * 1024)
+            if size_mb < 0.1:
+                size_str = f"{size_mb * 1024:.1f} KB"
+            else:
+                size_str = f"{size_mb:.2f} MB"
+            
+            return size_str
+            
+        except Exception as e:
+            raise RuntimeError(f"Error calculating file size: {str(e)}")
+    
     # ------------------------------------------------------------------ #
     # Format capabilities and UI updates
     # ------------------------------------------------------------------ #
@@ -275,15 +517,15 @@ class MesherWizard(QWidget):
         
         Format capabilities:
         - PLY: Supports per-vertex colors (RGB) and per-vertex opacity (alpha channel) ✓
+        - STL: Does NOT support colors or opacity (geometry only) ✓
         - OBJ: Supports colors via MTL files (not per-vertex), opacity via materials (not implemented)
-        - STL: Does NOT support colors or opacity (geometry only)
         - GLTF/GLB: Supports colors and opacity (not yet implemented)
         - FBX: Supports colors and opacity (not yet implemented)
         """
         capabilities = {
             "PLY": {"colors": True, "opacity": True, "implemented": True},
+            "STL": {"colors": False, "opacity": False, "implemented": True},
             "OBJ": {"colors": False, "opacity": False, "implemented": False},  # Not implemented yet
-            "STL": {"colors": False, "opacity": False, "implemented": False},  # Not implemented yet
             "GLTF": {"colors": True, "opacity": True, "implemented": False},  # Not implemented yet
             "GLB": {"colors": True, "opacity": True, "implemented": False},  # Not implemented yet
             "FBX": {"colors": True, "opacity": True, "implemented": False},  # Not implemented yet
@@ -310,6 +552,11 @@ class MesherWizard(QWidget):
             info_text += " (not yet implemented)"
         
         self.format_info_label.setText(info_text)
+        
+        # Show/hide STL-specific options
+        is_stl = format_name.upper() == "STL" and caps.get("implemented", False)
+        self.stl_format_row.itemAt(0).widget().setVisible(is_stl)
+        self.stl_binary_cb.setVisible(is_stl)
         
         # Enable/disable checkboxes based on format capabilities
         self.export_colors_cb.setEnabled(caps["colors"] and caps.get("implemented", False))
@@ -359,6 +606,9 @@ class MesherWizard(QWidget):
             return
         self._processed_dir = Path(folder)
         self.processed_label.setText(f"Processed slices directory: {folder}")
+        
+        # Auto-load volume and show preview with default bins
+        self.load_volume_and_histogram()
     
     def set_default_processed_dir(self, path: Optional[Path]) -> None:
         """
@@ -373,6 +623,8 @@ class MesherWizard(QWidget):
                 self.processed_label.setText(
                     f"Processed slices directory: {path} (default from preprocessing)"
                 )
+                # Auto-load volume and show preview with default bins
+                self.load_volume_and_histogram()
             else:
                 # Update label to show default is available
                 self.processed_label.setText(
@@ -448,11 +700,14 @@ class MesherWizard(QWidget):
         return bins
 
     def _populate_default_bins(self, vmin: float, vmax: float) -> None:
-        """Create evenly spaced bins according to spin_num_bins and current range."""
-        n_bins = int(self.spin_num_bins.value())
+        """Create evenly spaced bins with default number (6 bins)."""
+        n_bins = 6  # Default number of bins
         # Round to integers for bin edges
         vmin_int = int(round(vmin))
         vmax_int = int(round(vmax))
+        # Ensure minimum is at least 1 (0 is background/air)
+        if vmin_int < 1:
+            vmin_int = 1
         edges = np.linspace(vmin_int, vmax_int, n_bins + 1)
         self.bins_table.setRowCount(n_bins)
         
@@ -468,15 +723,18 @@ class MesherWizard(QWidget):
             enabled_item.setCheckState(Qt.Checked)
 
             # Create spinboxes for Low and High (integers)
+            # Ensure minimum is at least 1
+            min_val = max(1, int(round(vmin)))
+            max_val = int(round(vmax))
             low_spin = QSpinBox()
-            low_spin.setRange(int(round(vmin)), int(round(vmax)))
-            low_spin.setValue(int(round(edges[i])))
+            low_spin.setRange(min_val, max_val)
+            low_spin.setValue(max(min_val, int(round(edges[i]))))
             low_spin.setSingleStep(1)
             low_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'low', val))
             self._bin_low_spinboxes.append(low_spin)
             
             high_spin = QSpinBox()
-            high_spin.setRange(int(round(vmin)), int(round(vmax)))
+            high_spin.setRange(min_val, max_val)
             high_spin.setValue(int(round(edges[i + 1])))
             high_spin.setSingleStep(1)
             high_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'high', val))
@@ -504,6 +762,7 @@ class MesherWizard(QWidget):
         self._update_bin_visualization()
     
     def _on_bin_spin_changed(self, row: int, which: str, value: int) -> None:
+        # File size calculation is now manual only (button click)
         """Called when a bin Low/High spinbox value changes."""
         # Handle continuous bins mode
         if self.continuous_bins_cb.isChecked():
@@ -533,6 +792,8 @@ class MesherWizard(QWidget):
     
     def _on_histogram_bin_moved(self, bin_table_row: int, boundary_type: str, new_value: float) -> None:
         """Called when a bin boundary is dragged on the histogram."""
+        # Ensure minimum is at least 1
+        new_value = max(1.0, new_value)
         # Round to integer
         new_value_int = int(round(new_value))
         
@@ -550,9 +811,11 @@ class MesherWizard(QWidget):
                 # Handle continuous bins mode
                 if self.continuous_bins_cb.isChecked():
                     self._adjust_adjacent_bins(bin_table_row, boundary_type, new_value_int)
-                
-                # Update preview only (skip histogram to avoid update loop)
-                self._update_bin_visualization_no_histogram()
+                    # After adjusting adjacent bins, update histogram to show the changes
+                    self._update_bin_visualization()
+                else:
+                    # Update preview only (skip histogram to avoid update loop)
+                    self._update_bin_visualization_no_histogram()
 
     # ------------------------------------------------------------------ #
     # Volume loading + histogram (threaded)
@@ -571,58 +834,116 @@ class MesherWizard(QWidget):
             self.status.show_error("No image slices found in the selected directory.")
             return
 
-        def task(progress_cb) -> Tuple[np.ndarray, np.ndarray, float, float]:
-            # Load all RGB slices with progress
-            slices = []
-            for i, p in enumerate(paths, start=1):
-                arr = images.load_image_rgb(p)
-                slices.append(arr)
-                progress_cb(i, total_slices)
-
-            volume = np.stack(slices, axis=0)  # (Z, Y, X, 3)
-
-            # Grayscale intensities
-            grayscale = volume.mean(axis=-1)
-            intensities = grayscale.ravel()
-
-            # Exclude zeros from histogram / range to avoid the huge spike
-            non_zero = intensities[intensities > 0]
-
-            if non_zero.size > 0:
-                hist_values = non_zero
-            else:
-                # Fallback: if everything is zero (strange, but safe)
-                hist_values = intensities
-
-            vmin = float(hist_values.min())
-            vmax = float(hist_values.max())
-            return volume, hist_values, vmin, vmax
-
-        worker = FunctionWorker(task, with_progress=True)
-
+        # Create a custom worker that handles both loading and histogram computation
+        class VolumeLoadWorker(WorkerBase):
+            phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
+            
+            def run(self) -> None:  # type: ignore[override]
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    
+                    # Phase 1: Loading slices
+                    slices = []
+                    for i, p in enumerate(paths, start=1):
+                        if self.isInterruptionRequested():
+                            raise InterruptedError("Loading was cancelled")
+                        arr = images.load_image_rgb(p)
+                        slices.append(arr)
+                        # Emit phase progress
+                        self.phase_progress.emit("Loading slices", i, total_slices, total_slices + 2)
+                        # Also emit standard progress for compatibility
+                        self.progress.emit(i, total_slices + 2)
+                        # Process events less frequently
+                        if i % 50 == 0:
+                            QApplication.processEvents()
+                    
+                    volume = np.stack(slices, axis=0)  # (Z, Y, X, 3)
+                    
+                    # Phase 2: Computing intensity range
+                    self.phase_progress.emit("Computing intensity range", 0, 1, total_slices + 2)
+                    QApplication.processEvents()
+                    grayscale = volume.mean(axis=-1)
+                    intensities = grayscale.ravel()
+                    non_zero = intensities[intensities > 0]
+                    if non_zero.size > 0:
+                        hist_values = non_zero
+                    else:
+                        hist_values = intensities
+                    vmin = float(hist_values.min())
+                    vmax = float(hist_values.max())
+                    self.phase_progress.emit("Computing intensity range", 1, 1, total_slices + 2)
+                    QApplication.processEvents()
+                    
+                    # Phase 3: Computing histograms (aggregated and heatmap)
+                    # This is done in the success callback, but we report it here for progress
+                    self.phase_progress.emit("Preparing histograms", 0, 1, total_slices + 2)
+                    QApplication.processEvents()
+                    self.phase_progress.emit("Preparing histograms", 1, 1, total_slices + 2)
+                    
+                    self.finished.emit((volume, hist_values, vmin, vmax))
+                except InterruptedError:
+                    self.error.emit("Loading was cancelled by user")
+                except BaseException as exc:  # noqa: BLE001
+                    self._handle_exception(exc)
+        
+        worker = VolumeLoadWorker()
+        
         def on_success(result: object) -> None:
+            from PySide6.QtWidgets import QApplication
+            
             volume, hist_values, vmin, vmax = result  # type: ignore[misc]
             self._volume = volume
             self._current_range = (vmin, vmax)
 
-            self.spin_int_min.setValue(int(round(vmin)))
-            self.spin_int_max.setValue(int(round(vmax)))
-
-            # Update 3D histogram
-            self.histogram.set_histogram_3d(volume, n_bins=256, value_range=(vmin, vmax))
-            self._populate_default_bins(vmin, vmax)
+            # Process events before starting
+            QApplication.processEvents()
             
-            # Update preview
-            self.slice_preview.set_volume(volume)
-            self.slice_preview.set_bins(self._collect_bins_from_table())
+            # Populate default bins and update preview (fast operations)
+            try:
+                self._populate_default_bins(vmin, vmax)
+                QApplication.processEvents()
+                
+                bins = self._collect_bins_from_table()
+                
+                # Update preview immediately
+                self.slice_preview.set_volume(volume)
+                self.slice_preview.set_bins(bins)
+                QApplication.processEvents()
+            except Exception as e:
+                print(f"Error setting up bins and preview: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Update histogram (already computed in worker, but need to set it)
+            try:
+                self.histogram.set_histogram_3d(volume, n_bins=256, value_range=(vmin, vmax))
+                QApplication.processEvents()
+            except Exception as e:
+                print(f"Error setting histogram: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Update histogram with bin boundaries (now that bins exist)
+            try:
+                bins = self._collect_bins_from_table()
+                self.histogram.update_bins(bins)
+                QApplication.processEvents()
+            except Exception as e:
+                print(f"Error updating bins on histogram: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # File size calculation is now manual only (button click)
             
             self.btn_export_meshes.setEnabled(True)
 
+        # Run volume loading with progress (single dialog)
         self.status.run_threaded_with_progress(
             worker,
             "Loading volume...",
             on_success=on_success,
         )
+    
 
     # ------------------------------------------------------------------ #
     # Export meshes
@@ -655,13 +976,23 @@ class MesherWizard(QWidget):
         filename_prefix = self.edit_prefix.text().strip() or "ct_layer"
         
         spacing = self._collect_spacing()
-        vmin = int(self.spin_int_min.value())
-        vmax = int(self.spin_int_max.value())
+        # Get intensity range from current range (set when volume is loaded)
+        if self._current_range is not None:
+            vmin, vmax = self._current_range
+            vmin = int(round(vmin))
+            vmax = int(round(vmax))
+        else:
+            # Fallback if no volume loaded yet
+            vmin, vmax = 1, 255
         
         cfg = MeshingConfig(
             spacing=spacing,
             min_intensity=vmin,
             max_intensity=vmax,
+            smoothing_sigma=float(self.spin_smoothing_sigma.value()),
+            min_component_size=int(self.spin_min_component_size.value()),
+            enable_component_filtering=self.enable_component_filtering_cb.isChecked(),
+            enable_smoothing=self.enable_smoothing_cb.isChecked(),
         )
         cfg.opacity = opacity  # Add opacity to config
         
@@ -673,53 +1004,105 @@ class MesherWizard(QWidget):
         export_format = self.format_combo.currentText().upper()
         caps = self._get_format_capabilities(export_format)
         
+        # Get STL binary option
+        stl_binary = self.stl_binary_cb.isChecked() if export_format == "STL" else True
+        
         # Validate format is implemented
         if not caps.get("implemented", False):
             self.status.show_error(
                 f"Format '{export_format}' is not yet implemented. "
-                "Currently only PLY format is supported."
+                "Currently only PLY and STL formats are supported."
             )
             return
+        
+        # Capture export colors setting before creating worker
+        export_colors = self.export_colors_cb.isChecked() and caps["colors"]
         
         # Create a custom worker with phase-aware progress for export
         class ExportWorker(WorkerBase):
             phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
             
+            def __init__(self):
+                super().__init__()
+                self._cancelled = False
+            
             def run(self) -> None:  # type: ignore[override]
-                def phase_cb(phase: str, current: int, phase_total: int, overall_total: int) -> None:
-                    self.phase_progress.emit(phase, current, phase_total, overall_total)
-                    self.progress.emit(current, overall_total)
-                
-                # Apply colors option: if not exporting colors or format doesn't support it, remove colors
-                export_bins = bins
-                if not self.export_colors_cb.isChecked() or not caps["colors"]:
-                    # Create bins without colors
-                    from ct23d.core.models import IntensityBin
-                    export_bins = [
-                        IntensityBin(
-                            index=b.index,
-                            enabled=b.enabled,
-                            low=b.low,
-                            high=b.high,
-                            name=b.name,
-                            color=None,  # Remove color
-                        )
-                        for b in bins
-                    ]
-                
-                # Export uses the same meshing functions, so it will get phase progress
-                export_core.export_bins_to_meshes(
-                    volume=volume,
-                    bins=export_bins,
-                    config=cfg,
-                    output_dir=output_dir,
-                    filename_prefix=filename_prefix,
-                    export_mode=export_mode,
-                    format_name=export_format,
-                    opacity=opacity if caps["opacity"] else None,  # Only pass opacity if format supports it
-                    phase_progress_callback=phase_cb,
-                )
-                self.finished.emit(total_bins)
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    
+                    def phase_cb(phase: str, current: int, phase_total: int, overall_total: int) -> None:
+                        # Check for interruption request FIRST, before any other operations
+                        if self.isInterruptionRequested():
+                            self._cancelled = True
+                            raise InterruptedError("Export was cancelled by user")
+                        # Only emit progress if not cancelled
+                        if not self._cancelled:
+                            self.phase_progress.emit(phase, current, phase_total, overall_total)
+                            self.progress.emit(current, overall_total)
+                            # Process events to keep UI responsive and prevent freezing
+                            QApplication.processEvents()
+                        else:
+                            # Already cancelled, stop immediately
+                            raise InterruptedError("Export was cancelled by user")
+                    
+                    def progress_cb(current: int, total: int) -> None:
+                        # Check for interruption request
+                        if self.isInterruptionRequested():
+                            self._cancelled = True
+                            raise InterruptedError("Export was cancelled by user")
+                        # Only emit progress if not cancelled
+                        if not self._cancelled:
+                            self.progress.emit(current, total)
+                        else:
+                            # Already cancelled, stop immediately
+                            raise InterruptedError("Export was cancelled by user")
+                    
+                    # Check before starting
+                    if self.isInterruptionRequested():
+                        raise InterruptedError("Export was cancelled by user")
+                    
+                    # Apply colors option: if not exporting colors or format doesn't support it, remove colors
+                    export_bins = bins
+                    if not export_colors:
+                        # Create bins without colors
+                        from ct23d.core.models import IntensityBin
+                        export_bins = [
+                            IntensityBin(
+                                index=b.index,
+                                enabled=b.enabled,
+                                low=b.low,
+                                high=b.high,
+                                name=b.name,
+                                color=None,  # Remove color
+                            )
+                            for b in bins
+                        ]
+                    
+                    # Export uses the same meshing functions, so it will get phase progress
+                    export_core.export_bins_to_meshes(
+                        volume=volume,
+                        bins=export_bins,
+                        config=cfg,
+                        output_dir=output_dir,
+                        filename_prefix=filename_prefix,
+                        export_mode=export_mode,
+                        format_name=export_format,
+                        opacity=opacity if caps["opacity"] else None,  # Only pass opacity if format supports it
+                        stl_binary=stl_binary,  # STL format option
+                        progress_callback=progress_cb,
+                        phase_progress_callback=phase_cb,
+                    )
+                    
+                    # Check one more time before finishing
+                    if self.isInterruptionRequested() or self._cancelled:
+                        raise InterruptedError("Export was cancelled by user")
+                    
+                    self.finished.emit(total_bins)
+                except InterruptedError:
+                    # User cancelled - emit error signal
+                    self.error.emit("Export was cancelled by user")
+                except BaseException as exc:  # noqa: BLE001
+                    self._handle_exception(exc)
         
         worker = ExportWorker()
         
@@ -741,8 +1124,14 @@ class MesherWizard(QWidget):
     # ------------------------------------------------------------------ #
     def _on_add_bin(self) -> None:
         """Add a new bin to the table."""
-        vmin = int(self.spin_int_min.value())
-        vmax = int(self.spin_int_max.value())
+        # Get intensity range from current range (set when volume is loaded)
+        if self._current_range is not None:
+            vmin, vmax = self._current_range
+            vmin = int(round(vmin))
+            vmax = int(round(vmax))
+        else:
+            # Fallback if no volume loaded yet
+            vmin, vmax = 1, 255
         
         # Add new row
         row = self.bins_table.rowCount()
@@ -758,8 +1147,8 @@ class MesherWizard(QWidget):
         
         # Create spinboxes for Low and High (integers)
         low_spin = QSpinBox()
-        low_spin.setRange(int(round(vmin)), int(round(vmax)))
-        low_spin.setValue(int(round(mid - bin_width/2)))
+        low_spin.setRange(max(1, int(round(vmin))), int(round(vmax)))  # Minimum 1
+        low_spin.setValue(max(1, int(round(mid - bin_width/2))))  # Ensure at least 1
         low_spin.setSingleStep(1)
         low_spin.valueChanged.connect(lambda val, r=row: self._on_bin_spin_changed(r, 'low', val))
         if row >= len(self._bin_low_spinboxes):
@@ -833,6 +1222,7 @@ class MesherWizard(QWidget):
             self._update_bin_visualization()
     
     def _on_bin_item_changed(self, item: QTableWidgetItem) -> None:
+        # File size calculation is now manual only (button click)
         """Called when a bin table item is changed (including checkboxes)."""
         # Update visualization when enabled state changes
         if item.column() == 0:  # Enabled column

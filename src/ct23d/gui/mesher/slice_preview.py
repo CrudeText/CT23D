@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, List
 
 import numpy as np
-from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QSpinBox
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QSpinBox, QSizePolicy, QSlider
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor
 
@@ -40,17 +40,31 @@ class SlicePreviewWidget(QFrame):
         self._slice_selector.setValue(1)
         self._slice_selector.setEnabled(False)
         self._slice_selector.valueChanged.connect(self._on_slice_changed)
+        self._slice_selector.valueChanged.connect(self._on_selector_changed)  # Sync slider when spinbox changes
         nav_layout.addWidget(self._slice_selector)
         self._slice_count_label = QLabel("of 0")
         nav_layout.addWidget(self._slice_count_label)
+        
+        # Slider for quick navigation
+        self._slice_slider = QSlider(Qt.Orientation.Horizontal)
+        self._slice_slider.setRange(1, 1)
+        self._slice_slider.setValue(1)
+        self._slice_slider.setEnabled(False)
+        self._slice_slider.setMinimumWidth(200)
+        self._slice_slider.valueChanged.connect(self._on_slider_changed)
+        nav_layout.addWidget(self._slice_slider)
+        
         nav_layout.addStretch()
         layout.addLayout(nav_layout)
         
-        # Image display - make it bigger
+        # Image display - make it bigger and resizable
         self._image_label = QLabel()
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setMinimumSize(500, 500)  # Bigger minimum size
+        self._image_label.setMinimumSize(300, 300)  # Smaller minimum to allow more flexibility
         self._image_label.setStyleSheet("border: 1px solid gray; background-color: black;")
+        # Enable size policy to allow shrinking and expanding
+        from PySide6.QtWidgets import QSizePolicy
+        self._image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._image_label, stretch=1)
         
         self._volume: Optional[np.ndarray] = None
@@ -73,12 +87,17 @@ class SlicePreviewWidget(QFrame):
             self._slice_selector.setRange(1, num_slices)
             self._slice_selector.setEnabled(True)
             self._slice_count_label.setText(f"of {num_slices}")
+            # Set up slider
+            self._slice_slider.setRange(1, num_slices)
+            self._slice_slider.setEnabled(True)
             # Set to middle slice
             middle_slice = (num_slices // 2) + 1
             self._slice_selector.setValue(middle_slice)
+            self._slice_slider.setValue(middle_slice)
             self._slice_index = middle_slice - 1  # Convert to 0-indexed
         else:
             self._slice_selector.setEnabled(False)
+            self._slice_slider.setEnabled(False)
             self._slice_count_label.setText("of 0")
         self._update_preview()
     
@@ -86,6 +105,21 @@ class SlicePreviewWidget(QFrame):
         """Handle slice selector change."""
         self._slice_index = value - 1  # Convert to 0-indexed
         self._update_preview()
+    
+    def _on_slider_changed(self, value: int) -> None:
+        """Handle slider value change - update spinbox and preview."""
+        if self._slice_selector.value() != value:
+            self._slice_selector.blockSignals(True)
+            self._slice_selector.setValue(value)
+            self._slice_selector.blockSignals(False)
+            self._on_slice_changed(value)
+    
+    def _on_selector_changed(self, value: int) -> None:
+        """Handle spinbox value change - update slider."""
+        if self._slice_slider.value() != value:
+            self._slice_slider.blockSignals(True)
+            self._slice_slider.setValue(value)
+            self._slice_slider.blockSignals(False)
     
     def set_bins(self, bins: List[IntensityBin]) -> None:
         """
@@ -97,6 +131,12 @@ class SlicePreviewWidget(QFrame):
             List of intensity bins with colors
         """
         self._bins = bins
+        self._update_preview()
+    
+    def resizeEvent(self, event) -> None:
+        """Handle widget resize to update preview scaling."""
+        super().resizeEvent(event)
+        # Update preview when widget is resized
         self._update_preview()
     
     def _update_preview(self) -> None:
@@ -158,6 +198,7 @@ class SlicePreviewWidget(QFrame):
         pixmap = QPixmap.fromImage(qimage)
         
         # Scale to fit label while maintaining aspect ratio
+        # Use available size, which will adapt when the widget is resized
         label_size = self._image_label.size()
         if label_size.width() <= 0 or label_size.height() <= 0:
             # Use minimum size if actual size not available yet
@@ -173,7 +214,7 @@ class SlicePreviewWidget(QFrame):
         else:
             # Fallback: use a reasonable default size
             scaled_pixmap = pixmap.scaled(
-                500, 500,
+                300, 300,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )

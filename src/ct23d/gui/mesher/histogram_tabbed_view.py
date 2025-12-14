@@ -4,72 +4,60 @@ from typing import Optional, List, Callable
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtWidgets import QFrame, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QTabWidget, QWidget
 from PySide6 import QtCore
 from PySide6.QtGui import QColor
 
 from ct23d.core.models import IntensityBin
+from ct23d.gui.mesher.histogram_3d_view import Histogram3DView
 
 
-class Histogram3DView(QFrame):
+class AggregatedHistogramView(QFrame):
     """
-    3D histogram view showing:
-    - X axis: Slice number
-    - Y axis: Intensity
-    - Z axis: Pixel count (shown as color/intensity in 2D heatmap)
+    Aggregated histogram view showing intensity distribution across all slices.
+    - X axis: Intensity
+    - Y axis: Pixel count (aggregated across all slices)
+    """
     
-    Since PyQtGraph doesn't have native 3D support, we display this as a 2D heatmap
-    where the color represents the pixel count (Z axis).
-    """
-
     def __init__(self, parent: Optional[QFrame] = None) -> None:
         super().__init__(parent)
-
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        # Use PyQtGraph's PlotWidget for 2D heatmap representation
+        
+        # Use PyQtGraph's PlotWidget for histogram
         self._plot = pg.PlotWidget(self)
         layout.addWidget(self._plot)
-
-        # Swap axes: intensity horizontal (bottom), slice number vertical (left)
+        
         self._plot.setLabel("bottom", "Intensity")
-        self._plot.setLabel("left", "Slice Number")
+        self._plot.setLabel("left", "Pixel Count")
         self._plot.showGrid(x=True, y=True, alpha=0.3)
         
-        # Store data for potential future use
-        self._intensity_data: Optional[np.ndarray] = None
-        self._slice_data: Optional[np.ndarray] = None
-        self._count_data: Optional[np.ndarray] = None
+        # Store data
+        self._histogram_data: Optional[np.ndarray] = None
+        self._bin_edges: Optional[np.ndarray] = None
         self._vmin: float = 0.0
         self._vmax: float = 255.0
-        self._num_slices: int = 0
         self._bin_lines: List[pg.InfiniteLine] = []
         self._bin_labels: List[pg.TextItem] = []
         self.bin_boundary_changed: Optional[Callable[[int, str, float], None]] = None
-
+    
     def clear(self) -> None:
-        """Clear the 3D histogram plot."""
+        """Clear the histogram plot."""
         self._plot.clear()
-        self._intensity_data = None
-        self._slice_data = None
-        self._count_data = None
+        self._histogram_data = None
+        self._bin_edges = None
         self._bin_lines.clear()
         self._bin_labels.clear()
-
-    def set_histogram_3d(
+    
+    def set_aggregated_histogram(
         self,
         volume: np.ndarray,
         n_bins: int = 256,
         value_range: Optional[tuple[float, float]] = None,
     ) -> None:
         """
-        Compute and display a 3D histogram from a volume.
-        
-        Displays as a 2D heatmap where:
-        - X axis: Slice numbers
-        - Y axis: Intensity bins
-        - Color/intensity: Pixel count (Z axis)
+        Compute and display aggregated histogram from a volume.
         
         Parameters
         ----------
@@ -83,7 +71,7 @@ class Histogram3DView(QFrame):
         if volume is None or volume.size == 0:
             self.clear()
             return
-
+        
         arr = np.asarray(volume)
         
         # Convert RGB to grayscale if needed
@@ -92,121 +80,72 @@ class Histogram3DView(QFrame):
         else:
             grayscale = arr  # (Z, Y, X)
         
-        num_slices = grayscale.shape[0]
-        self._num_slices = num_slices
+        # Flatten all slices into a single array
+        intensities = grayscale.ravel()
+        
+        # Filter out intensity 0 pixels (background/air)
+        intensities_filtered = intensities[intensities > 0]
+        
+        if intensities_filtered.size == 0:
+            # Fallback: if everything is zero, use all intensities
+            intensities_filtered = intensities
         
         # Determine intensity range
         if value_range is None:
-            # Exclude zeros to avoid huge spike
-            non_zero = grayscale[grayscale > 0]
-            if non_zero.size > 0:
-                vmin = float(non_zero.min())
-                vmax = float(non_zero.max())
-            else:
-                vmin = float(grayscale.min())
-                vmax = float(grayscale.max())
+            vmin = float(intensities_filtered.min())
+            vmax = float(intensities_filtered.max())
         else:
             vmin, vmax = value_range
+        
+        # Ensure minimum is at least 1
+        if vmin < 1:
+            vmin = 1.0
         
         self._vmin = vmin
         self._vmax = vmax
         
-        # Compute histogram for each slice
-        # Result: (num_slices, n_bins) - pixel counts per slice per intensity bin
-        slice_histograms = []
-        # Use slightly extended range to ensure vmax is included in last bin
-        # numpy.histogram uses [left, right) for all bins except last which is [left, right]
-        intensity_bin_edges = np.linspace(vmin, vmax, n_bins + 1)
-        # Ensure the last edge includes vmax by making it slightly larger
-        intensity_bin_edges[-1] = vmax + 1e-6
-        intensity_bin_centers = (intensity_bin_edges[:-1] + intensity_bin_edges[1:]) / 2
-        
-        # Process slices - only process events occasionally to avoid slowing down computation
-        from PySide6.QtWidgets import QApplication
-        batch_size = max(50, num_slices // 10)  # Update every 10% or every 50 slices (less frequent)
-        
-        for z_idx in range(num_slices):
-            slice_data = grayscale[z_idx]
-            # Compute histogram for ALL pixels (including zeros)
-            # This ensures we see slices even if they have mostly zeros
-            # Use the same bin edges for all slices to ensure consistency
-            # Clip values to [vmin, vmax+epsilon] to ensure vmax is included
-            slice_data_clipped = np.clip(slice_data, vmin, vmax + 1e-6)
-            # Use the same bin edges for all slices
-            hist, _ = np.histogram(slice_data_clipped, bins=intensity_bin_edges)
-            slice_histograms.append(hist)
-            
-            # Process events less frequently to avoid slowing down computation
-            if (z_idx + 1) % batch_size == 0:
-                QApplication.processEvents()
-        
-        histograms_2d = np.array(slice_histograms)  # (num_slices, n_bins)
+        # Compute aggregated histogram (only on filtered intensities)
+        # Ensure vmax is included by extending the last bin edge slightly
+        bin_edges = np.linspace(vmin, vmax, n_bins + 1)
+        bin_edges[-1] = vmax + 1e-6  # Ensure vmax is included in last bin
+        # Clip filtered intensities to ensure they're in range
+        intensities_clipped = np.clip(intensities_filtered, vmin, vmax + 1e-6)
+        hist, edges = np.histogram(intensities_clipped, bins=bin_edges)
         
         # Store data
-        self._count_data = histograms_2d
+        self._histogram_data = hist
+        self._bin_edges = edges
         
         # Clear previous plot (this removes bin lines, but we'll re-add them in update_bins)
+        # Store bin lines before clearing so we can check if they need to be re-added
         self._plot.clear()
         # Clear the bin_lines list since the items are no longer in the plot
         self._bin_lines.clear()
         self._bin_labels.clear()
         
-        # Create 2D heatmap where:
-        # - Rows (Y axis) = Slice numbers (vertical)
-        # - Cols (X axis) = Intensity bins (horizontal)
-        # - Color = Pixel count (Z axis)
-        # Keep original orientation: rows = slices, cols = intensity bins
-        img_data = histograms_2d  # (num_slices, n_bins) - rows are slices, cols are intensity bins
+        # Plot histogram as step plot (PyQtGraph style)
+        # For stepMode=True, we need len(x) = len(y) + 1
+        # x = bin edges (n_bins + 1 values)
+        # y = bin counts (n_bins values)
+        x = edges  # Bin edges (n_bins + 1 values)
+        y = hist  # Bin counts (n_bins values)
         
-        # Normalize for better visualization (log scale to handle large variations)
-        img_data_log = np.log1p(img_data)  # log(1+x) to handle zeros
+        # Create step plot (linear scale - no log mode)
+        self._plot.plot(
+            x, y,
+            stepMode=True,
+            fillLevel=0,
+            brush=(100, 150, 255, 100),
+            pen=pg.mkPen(color=(100, 150, 255), width=1),
+        )
         
-        # Create image item
-        img_item = pg.ImageItem(img_data_log)
-        self._plot.addItem(img_item)
-        
-        # Set up axes (swapped: intensity horizontal, slice number vertical)
-        self._plot.setLabel("bottom", "Intensity")
-        self._plot.setLabel("left", "Slice Number")
-        
-        # Set axis ranges - image item uses (x, y, width, height)
-        # For ImageItem, the rect maps the image rectangle to data coordinates
-        # Image has shape (num_slices, n_bins) = (rows, cols)
-        # We want: column j (0 to n_bins-1) maps to intensity bin j (horizontal/X axis)
-        # And: row i (0 to num_slices-1) maps to slice i (vertical/Y axis)
-        
-        # ImageItem maps pixel boundaries, not centers
-        # Column 0 (intensity) spans from x = vmin to x = vmin + bin_width
-        # Column n_bins-1 spans from x = vmax - bin_width to x = vmax
-        # Row 0 (slice) spans from y = -0.5 to y = 0.5 (center at 0)
-        # Row num_slices-1 spans from y = num_slices-1.5 to y = num_slices-0.5
-        
-        # Calculate bin width for intensity
-        intensity_bin_width = (vmax - vmin) / n_bins if n_bins > 0 else 1.0
-        
-        # Set rect: (x_min, y_min, width, height)
-        # x_min = vmin so column 0 (lowest intensity) left edge is at x=vmin
-        # y_min = -0.5 so row 0 (first slice) bottom edge is at y=-0.5
-        # width = vmax - vmin so column n_bins-1 right edge is at x=vmax
-        # height = num_slices so row num_slices-1 top edge is at y=num_slices-0.5
-        img_item.setRect(QtCore.QRectF(
-            vmin, -0.5,  # x, y position (left edge of intensity, bottom edge of slice 0)
-            vmax - vmin, num_slices  # width, height (intensity span, slice span)
-        ))
-        
-        # Auto-zoom to fit the data
-        # X range: vmin to vmax (full intensity range) with small padding
-        # Y range: -0.5 to num_slices-0.5 (so slice centers are at integers)
+        # Set axis ranges - auto-zoom to fit data
         self._plot.setXRange(vmin, vmax, padding=0.02)
-        self._plot.setYRange(-0.5, max(num_slices - 0.5, 0.5), padding=0.02)
-        
-        # Add color bar to show pixel count scale
-        # Note: PyQtGraph's colorbar might need different API
-        try:
-            self._plot.addColorBar(img_item, colorMap='viridis', label='Pixel Count (log scale)')
-        except Exception:
-            # Fallback if colorbar API is different
-            pass
+        if hist.size > 0 and hist.max() > 0:
+            y_max = float(hist.max()) * 1.05  # 5% padding
+        else:
+            y_max = 1.0
+        self._plot.setYRange(0, y_max, padding=0.02)
     
     def update_bins(self, bins: List[IntensityBin]) -> None:
         """
@@ -257,15 +196,10 @@ class Histogram3DView(QFrame):
             self._plot.removeItem(line)
             self._bin_lines.remove(line)
         
-        # Remove labels that don't match
-        labels_to_remove = []
+        # Remove all labels (we'll recreate them)
         for label in self._bin_labels:
-            # Labels don't have direct bin reference, so we'll recreate them
-            labels_to_remove.append(label)
-        
-        for label in labels_to_remove:
             self._plot.removeItem(label)
-            self._bin_labels.remove(label)
+        self._bin_labels.clear()
         
         # Now add missing lines and labels for bins that don't have them yet
         existing_line_keys = set()
@@ -289,7 +223,7 @@ class Histogram3DView(QFrame):
                 color = QColor(int(r * 255), int(g * 255), int(b * 255))
             else:
                 # Generate a unique color using HSV
-                hue = (i / max(num_bins, 1)) * 0.8  # Use 0-0.8 range for vibrant colors
+                hue = (i / max(num_bins, 1)) * 0.8
                 saturation = 0.8
                 value = 0.9
                 rgb = colorsys.hsv_to_rgb(hue, saturation, value)
@@ -298,18 +232,18 @@ class Histogram3DView(QFrame):
             bin_table_row = bin_obj.index if hasattr(bin_obj, 'index') and bin_obj.index is not None else i
             
             # Add low boundary line if it doesn't exist
-            # Bin boundaries should be VERTICAL (angle=90) since intensity is on X-axis (horizontal)
+            # In aggregated histogram, intensity is on X-axis, so lines should be vertical (angle=90)
             if (bin_table_row, 'low') not in existing_line_keys:
                 # Ensure position is within bounds
                 pos = max(self._vmin, min(bin_obj.low, self._vmax))
                 line_low = pg.InfiniteLine(
                     pos=pos,
-                    angle=90,  # Vertical line (across intensity axis, which is now horizontal)
+                    angle=90,  # Vertical line (across intensity axis)
                     pen=pg.mkPen(color=color, width=3, style=QtCore.Qt.SolidLine),  # Thicker, more visible
                     movable=True,
                     bounds=[self._vmin, self._vmax]
                 )
-                line_low.setZValue(10)  # Draw on top of heatmap
+                line_low.setZValue(10)  # Draw on top of histogram
                 line_low.bin_table_row = bin_table_row
                 line_low.bin_low_value = bin_obj.low
                 line_low.bin_high_value = bin_obj.high
@@ -324,12 +258,12 @@ class Histogram3DView(QFrame):
                 pos = max(self._vmin, min(bin_obj.high, self._vmax))
                 line_high = pg.InfiniteLine(
                     pos=pos,
-                    angle=90,  # Vertical line (across intensity axis, which is now horizontal)
+                    angle=90,  # Vertical line (across intensity axis)
                     pen=pg.mkPen(color=color, width=3, style=QtCore.Qt.SolidLine),  # Thicker, more visible
                     movable=True,
                     bounds=[self._vmin, self._vmax]
                 )
-                line_high.setZValue(10)  # Draw on top of heatmap
+                line_high.setZValue(10)  # Draw on top of histogram
                 line_high.bin_table_row = bin_table_row
                 line_high.bin_low_value = bin_obj.low
                 line_high.bin_high_value = bin_obj.high
@@ -338,26 +272,33 @@ class Histogram3DView(QFrame):
                 self._plot.addItem(line_high)
                 self._bin_lines.append(line_high)
             
-            # Add label on the left side of the plot (Y-axis side, since slice number is vertical)
-            # Position at the middle of the bin's intensity range (X position) and at slice 0 (Y position)
+            # Add label at the top of the plot
             bin_id = bin_obj.index if hasattr(bin_obj, 'index') and bin_obj.index is not None else i
             label_text = f"Bin {bin_id + 1}"
             mid_intensity = (bin_obj.low + bin_obj.high) / 2
+            # Get current Y range from plot
+            if self._plot.getViewBox() is not None:
+                y_range = self._plot.getViewBox().viewRange()[1]
+                y_max = y_range[1]
+            else:
+                # Fallback: use histogram data max
+                if self._histogram_data is not None and self._histogram_data.size > 0:
+                    y_max = float(self._histogram_data.max()) * 1.05
+                else:
+                    y_max = 1000.0
             label = pg.TextItem(
                 text=label_text,
                 color=color,
-                anchor=(1, 0.5),  # Right-aligned, vertically centered (so it appears on left Y-axis side)
+                anchor=(0.5, 1),  # Center-aligned, bottom-anchored
                 border=pg.mkPen(color=color, width=1),
                 fill=pg.mkBrush((0, 0, 0, 200))
             )
-            # Position: X = mid_intensity (intensity position), Y = -0.5 (left edge, slice 0)
-            label.setPos(mid_intensity, -0.5)
+            label.setPos(mid_intensity, y_max * 0.95)
             self._plot.addItem(label)
             self._bin_labels.append(label)
     
     def _on_line_moved(self, line: pg.InfiniteLine) -> None:
         """Called when a bin boundary line is dragged."""
-        # Get the new position (round to integer)
         new_pos = int(round(line.value()))
         # Ensure minimum is at least 1
         if new_pos < 1:
@@ -376,3 +317,98 @@ class Histogram3DView(QFrame):
     def set_bin_boundary_callback(self, callback) -> None:
         """Set callback for when bin boundaries are moved."""
         self.bin_boundary_changed = callback
+
+
+class HistogramTabbedView(QFrame):
+    """
+    Tabbed histogram view with:
+    - Tab 1: Aggregated Histogram (all slices combined)
+    - Tab 2: Slice-by-Slice Heatmap (2D heatmap)
+    - Tab 3: 3D Surface Plot (true 3D visualization)
+    """
+    
+    def __init__(self, parent: Optional[QFrame] = None) -> None:
+        super().__init__(parent)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create tab widget
+        self._tabs = QTabWidget(self)
+        layout.addWidget(self._tabs)
+        
+        # Tab 1: Aggregated Histogram
+        self._aggregated_view = AggregatedHistogramView(self)
+        self._tabs.addTab(self._aggregated_view, "Aggregated Histogram")
+        
+        # Tab 2: Slice-by-Slice Heatmap (2D heatmap)
+        self._heatmap_view = Histogram3DView(self)
+        self._tabs.addTab(self._heatmap_view, "Slice-by-Slice Heatmap")
+        
+        # 3D Surface Plot removed - too slow
+        self._gl_view = None
+        
+        # Store callback
+        self.bin_boundary_changed: Optional[Callable[[int, str, float], None]] = None
+    
+    def clear(self) -> None:
+        """Clear all histogram views."""
+        self._aggregated_view.clear()
+        self._heatmap_view.clear()
+        if self._gl_view is not None:
+            self._gl_view.clear()
+    
+    def set_histogram_3d(
+        self,
+        volume: np.ndarray,
+        n_bins: int = 256,
+        value_range: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """
+        Set histogram data for all views.
+        
+        Parameters
+        ----------
+        volume : np.ndarray
+            Volume data
+        n_bins : int
+            Number of intensity bins
+        value_range : Optional[tuple[float, float]]
+            Intensity range (vmin, vmax)
+        """
+        from PySide6.QtWidgets import QApplication
+        
+        # Update aggregated view (fast, should complete quickly)
+        try:
+            self._aggregated_view.set_aggregated_histogram(volume, n_bins, value_range)
+            QApplication.processEvents()
+        except Exception as e:
+            print(f"Error updating aggregated histogram: {e}")
+        
+        # Update heatmap view (can be slow for large volumes)
+        try:
+            self._heatmap_view.set_histogram_3d(volume, n_bins, value_range)
+            QApplication.processEvents()
+        except Exception as e:
+            print(f"Error updating heatmap histogram: {e}")
+    
+    def update_bins(self, bins: List[IntensityBin]) -> None:
+        """
+        Update bin boundaries in both views.
+        
+        Parameters
+        ----------
+        bins : List[IntensityBin]
+            List of intensity bins
+        """
+        self._aggregated_view.update_bins(bins)
+        self._heatmap_view.update_bins(bins)
+        if self._gl_view is not None:
+            self._gl_view.update_bins(bins)
+    
+    def set_bin_boundary_callback(self, callback) -> None:
+        """Set callback for when bin boundaries are moved."""
+        self.bin_boundary_changed = callback
+        self._aggregated_view.set_bin_boundary_callback(callback)
+        self._heatmap_view.set_bin_boundary_callback(callback)
+

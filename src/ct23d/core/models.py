@@ -106,6 +106,36 @@ class PreprocessConfig:
     Rotation angle in degrees (0, 90, 180, 270) to apply during preprocessing.
     Positive = clockwise. Rotation is applied when loading images for processing.
     """
+    
+    crop_objects: Optional[List[dict]] = None
+    """
+    Optional list of crop objects, each containing:
+    - 'mask': 2D boolean mask (Y, X) - pixels inside mask are kept, outside are set to black
+    - 'slice_min': int - first slice where crop applies (0-based)
+    - 'slice_max': int - last slice where crop applies (0-based, inclusive)
+    If None or empty, no cropping is applied.
+    """
+    
+    object_removal_objects: Optional[List[dict]] = None
+    """
+    Optional list of object removal objects, each containing:
+    - 'mask': 2D boolean mask (Y, X) - pixels to remove
+    - 'slice_min': int - first slice where removal applies (0-based)
+    - 'slice_max': int - last slice where removal applies (0-based, inclusive)
+    If None or empty, no object removal is applied.
+    """
+    
+    non_grayscale_slice_ranges: Optional[List[Tuple[int, int]]] = None
+    """
+    Optional list of (min_slice, max_slice) tuples for non-grayscale removal (0-based, inclusive).
+    If None or empty, no non-grayscale removal is applied.
+    """
+    
+    export_slice_range: Optional[Tuple[int, int]] = None
+    """
+    Optional tuple (min_slice, max_slice) for export slice range (0-based, inclusive).
+    If None, all processed slices are exported.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -193,11 +223,23 @@ class MeshingConfig:
     conservative default suited to full-body scans).
     """
 
+    enable_component_filtering: bool = True
+    """
+    If True, remove small connected components smaller than min_component_size.
+    If False, skip component filtering (preserves all details, may include noise).
+    """
+
     smoothing_sigma: float = 1.0
     """
     Sigma for Gaussian smoothing (in voxel units).
     Used in build_mask() and optionally in per-bin masks.
     Mirrors '--smoothing-sigma'.
+    """
+
+    enable_smoothing: bool = True
+    """
+    If True, apply Gaussian smoothing to masks before meshing.
+    If False, skip smoothing (preserves sharp edges, may create jagged surfaces).
     """
 
     # --- Binning ---

@@ -94,9 +94,18 @@ class StatusController(QObject):
         # Track the current maximum (total steps) for the progress bar.
         state = {"max": 0, "current_phase": "starting", "phase_current": 0, "phase_total": 0, "phase_start_time": None}
         
-        # Determine phase names based on title (different for preprocessing vs meshing)
-        is_meshing = "meshes" in (title or "").lower()
-        if is_meshing:
+        # Determine phase names based on title (different for preprocessing vs meshing vs file size)
+        title_lower = (title or "").lower()
+        is_meshing = "meshes" in title_lower
+        is_file_size = "file size" in title_lower or "calculating" in title_lower
+        
+        if is_file_size:
+            # File size calculation: simple single phase
+            all_phases = ["calculating"]
+            phase_names = {
+                "calculating": "Calculating file size"
+            }
+        elif is_meshing:
             all_phases = ["Building masks", "Extracting meshes", "Saving files"]
             phase_names = {
                 "Building masks": "Building masks",
@@ -157,17 +166,24 @@ class StatusController(QObject):
             phase_total = state["phase_total"]
             
             # Build phase status lines
-            status_lines = []
-            for p in all_phases:
-                p_name = phase_names.get(p, p.capitalize())
-                if completed_phases.get(p, False):
-                    status_lines.append(f"✓ {p_name}: Complete")
-                elif p == phase and phase_total > 0:
-                    status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+            if is_file_size:
+                # For file size calculation, show simple progress
+                if phase_total > 0:
+                    status_text = f"{phase_names.get(phase, 'Calculating')}: {current} / {phase_total}"
                 else:
-                    status_lines.append(f"  {p_name}: Pending")
-            
-            status_text = "\n".join(status_lines)
+                    status_text = phase_names.get(phase, "Calculating file size...")
+            else:
+                status_lines = []
+                for p in all_phases:
+                    p_name = phase_names.get(p, p.capitalize())
+                    if completed_phases.get(p, False):
+                        status_lines.append(f"✓ {p_name}: Complete")
+                    elif p == phase and phase_total > 0:
+                        status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+                    else:
+                        status_lines.append(f"  {p_name}: Pending")
+                
+                status_text = "\n".join(status_lines)
             
             # Calculate estimated time remaining for current phase
             if current > 0 and phase_total > 0 and state["phase_start_time"] is not None:
@@ -218,16 +234,30 @@ class StatusController(QObject):
                 state["max"] = total
                 dialog.setMaximum(total)
             dialog.setValue(done)
+            
+            # For file size calculation, update state to show progress
+            if is_file_size:
+                state["current_phase"] = "calculating"
+                state["phase_current"] = done
+                state["phase_total"] = total
+                if state["phase_start_time"] is None:
+                    state["phase_start_time"] = time.time()
+                update_timer_display()
+            
             QApplication.processEvents()
 
         def on_error(message: str) -> None:
             timer.stop()
+            # Stop the worker immediately
+            worker.requestInterruption()
+            worker.terminate()  # Force stop if it's still running
+            cleanup_worker()
+            
             # Don't hide dialog immediately - let user see the cancellation
             if "cancelled" in message.lower() or "cancel" in message.lower():
                 # Update dialog to show cancellation message clearly
-                dialog.setLabelText(f"⚠️ {message}\n\nThe preprocessing has been stopped.")
+                dialog.setLabelText(f"⚠️ {message}\n\nThe operation has been stopped.")
                 dialog.setCancelButtonText("Close")
-                dialog.setCancelButtonEnabled(True)
                 dialog.setValue(dialog.maximum())  # Set to 100% to show it's done
                 # Force UI update immediately
                 QApplication.processEvents()
@@ -235,22 +265,31 @@ class StatusController(QObject):
                 # Don't auto-close - user can click "Close" button when ready
             else:
                 dialog.hide()
-                cleanup_worker()
                 self.show_error(message)
 
         def on_finished(result: object) -> None:
-            dialog.hide()
-            cleanup_worker()
-            if on_success is not None:
-                on_success(result)
+            # Only process result if not cancelled
+            if not worker.isInterruptionRequested():
+                dialog.hide()
+                cleanup_worker()
+                if on_success is not None:
+                    on_success(result)
+            else:
+                # Was cancelled, just clean up silently
+                dialog.hide()
+                cleanup_worker()
 
         # Wire up signals
         def on_cancel() -> None:
             """Handle cancel button click."""
             worker.requestInterruption()
+            # Force immediate termination of the thread
+            if worker.isRunning():
+                worker.terminate()
             dialog.setLabelText(f"{dialog.labelText()}\n\n⚠️ Cancelling... Please wait.")
             dialog.setCancelButtonText("Cancelling...")
-            dialog.setCancelButtonEnabled(False)  # Disable cancel button while stopping
+            # Force immediate UI update
+            QApplication.processEvents()
         
         dialog.canceled.connect(on_cancel)
         worker.progress.connect(on_progress)   # type: ignore[arg-type]

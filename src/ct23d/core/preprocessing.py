@@ -105,6 +105,26 @@ def preprocess_slices(
         rgb_slices.append(images.load_image_rgb(p, rotation=cfg.rotation))
     volume_rgb = np.stack(rgb_slices, axis=0)  # (Z, Y, X, 3)
     
+    # Apply crop masks if specified (each crop applies to its slice range)
+    if cfg.crop_objects:
+        for crop_obj in cfg.crop_objects:
+            crop_mask = crop_obj.get('mask')
+            slice_min = crop_obj.get('slice_min', 0)
+            slice_max = crop_obj.get('slice_max', len(volume_rgb) - 1)
+            
+            if crop_mask is not None:
+                # Clamp slice range to valid bounds
+                slice_min = max(0, min(slice_min, len(volume_rgb) - 1))
+                slice_max = max(slice_min, min(slice_max, len(volume_rgb) - 1))
+                
+                # Apply crop mask to slices in range
+                # crop_mask=True means keep those pixels, False means remove (set to black)
+                keep_mask = crop_mask
+                for z_idx in range(slice_min, slice_max + 1):
+                    if z_idx < len(volume_rgb):
+                        # Set pixels outside the crop mask to black
+                        volume_rgb[z_idx][~keep_mask] = [0, 0, 0]
+    
     if progress_cb is not None:
         progress_cb("loading", total, total, total)  # Mark loading as complete
 
@@ -126,9 +146,11 @@ def preprocess_slices(
         grayscale_tolerance=cfg.grayscale_tolerance,
         saturation_threshold=cfg.saturation_threshold,
         remove_bed=cfg.remove_bed,
-        remove_non_grayscale=cfg.remove_non_grayscale,
-        object_mask=cfg.object_mask,
-        object_mask_slice_index=cfg.object_mask_slice_index,
+        remove_non_grayscale=cfg.remove_non_grayscale,  # Legacy flag
+        object_mask=cfg.object_mask,  # Legacy support
+        object_mask_slice_index=cfg.object_mask_slice_index,  # Legacy support
+        non_grayscale_slice_ranges=cfg.non_grayscale_slice_ranges,  # New: slice ranges for non-grayscale removal
+        object_removal_objects=cfg.object_removal_objects,  # New: objects with slice ranges
         progress_cb=progress_cb,
     )
 
@@ -140,14 +162,29 @@ def preprocess_slices(
     # ------------------------------------------------------------------
     _ensure_dir(processed_dir)
 
-    for idx, (src_path, slice_arr) in enumerate(zip(slice_paths, processed_volume), start=1):
+    # Determine which slices to export
+    if cfg.export_slice_range is not None:
+        min_slice, max_slice = cfg.export_slice_range
+        # Clamp to valid range
+        min_slice = max(0, min(min_slice, len(processed_volume) - 1))
+        max_slice = max(min_slice, min(max_slice, len(processed_volume) - 1))
+        export_indices = list(range(min_slice, max_slice + 1))
+    else:
+        # Export all slices
+        export_indices = list(range(len(processed_volume)))
+    
+    export_total = len(export_indices)
+    
+    for export_idx, z_idx in enumerate(export_indices, start=1):
         if progress_cb is not None:
-            progress_cb("saving", idx, total, total)
+            progress_cb("saving", export_idx, export_total, export_total)
 
+        src_path = slice_paths[z_idx]
+        slice_arr = processed_volume[z_idx]
         out_path = processed_dir / src_path.name
         images.save_image_rgb(out_path, slice_arr)
     
     if progress_cb is not None:
-        progress_cb("saving", total, total, total)  # Mark saving as complete
+        progress_cb("saving", export_total, export_total, export_total)  # Mark saving as complete
 
     return processed_dir

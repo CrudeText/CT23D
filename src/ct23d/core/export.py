@@ -73,6 +73,7 @@ def export_bins_to_meshes(
     export_mode: str = "separate",  # "separate" or "combined"
     format_name: str = "PLY",  # "PLY", "OBJ", "STL"
     opacity: Optional[float] = None,
+    stl_binary: bool = True,  # For STL format: True=binary, False=ASCII
     progress_callback: Optional[Callable[[int, int], None]] = None,
     phase_progress_callback: Optional[Callable[[str, int, int, int], None]] = None,
 ) -> List[Path]:
@@ -130,30 +131,88 @@ def export_bins_to_meshes(
         from . import bins as binsmod
         total = len(enabled_bins)
         
+        # Phase-aware progress for combined mode
+        phase = "Building masks"
+        phase_current = 0
+        phase_total = total
+        overall_current = 0
+        overall_total = total * 3  # 3 phases: build, extract, save
+        
+        if phase_progress_callback:
+            phase_progress_callback(phase, 0, phase_total, overall_total)
+        
+        # Phase 1: Build all masks first
+        bin_masks = []
         for i, bin_ in enumerate(enabled_bins):
+            # Check for cancellation via progress callbacks
             if progress_callback:
                 progress_callback(i, total)
+            
+            # Update phase progress for building masks
+            if phase_progress_callback:
+                phase_current = i + 1
+                overall_current = i + 1
+                # The callback will check for cancellation and raise InterruptedError if needed
+                phase_progress_callback(phase, phase_current, phase_total, overall_total)
             
             # Build mask for this bin
             bin_mask = binsmod.build_bin_mask(volume_gray, bin_)
             
             if config.skip_empty_bins and np.count_nonzero(bin_mask) == 0:
+                bin_masks.append(None)
                 continue
             
-            # Clean and smooth
-            bin_mask_clean = meshing_mod.clean_bin_mask(bin_mask, config)
+            # Clean and smooth (if enabled)
+            if config.enable_component_filtering:
+                bin_mask_clean = meshing_mod.clean_bin_mask(bin_mask, config)
+            else:
+                bin_mask_clean = bin_mask
             if config.skip_empty_bins and np.count_nonzero(bin_mask_clean) == 0:
+                bin_masks.append(None)
                 continue
             
-            bin_mask_smooth = meshing_mod.smooth_mask(bin_mask_clean, config.smoothing_sigma)
+            if config.enable_smoothing:
+                bin_mask_smooth = meshing_mod.smooth_mask(bin_mask_clean, config.smoothing_sigma)
+            else:
+                bin_mask_smooth = bin_mask_clean
             if config.skip_empty_bins and np.count_nonzero(bin_mask_smooth) == 0:
+                bin_masks.append(None)
                 continue
             
-            # Extract mesh
-            verts, faces, colors = meshing_mod.extract_mesh(bin_mask_smooth, volume_color, config)
+            bin_masks.append(bin_mask_smooth)
+        
+        # Mark building masks phase as complete
+        if phase_progress_callback:
+            phase_progress_callback(phase, phase_total, phase_total, overall_total)
+        
+        # Phase 2: Extract all meshes
+        if phase_progress_callback:
+            phase = "Extracting meshes"
+            phase_current = 0
+            phase_total = total
+            overall_current = total
+            phase_progress_callback(phase, 0, phase_total, overall_total)
+        
+        for i, (bin_, bin_mask_smooth) in enumerate(zip(enabled_bins, bin_masks)):
+            if bin_mask_smooth is None:
+                continue
+            
+            # Extract mesh (with progress callback to prevent freezing)
+            def extract_progress_cb(current: int, total: int) -> None:
+                # This helps keep UI responsive during long mesh extractions
+                pass
+            
+            verts, faces, colors = meshing_mod.extract_mesh(bin_mask_smooth, volume_color, config, progress_callback=extract_progress_cb)
             
             if verts.size == 0 or faces.size == 0:
                 continue
+            
+            # Update phase progress for extracting meshes
+            if phase_progress_callback:
+                phase_current = i + 1
+                overall_current = total + i + 1
+                # The callback will check for cancellation and raise InterruptedError if needed
+                phase_progress_callback(phase, phase_current, phase_total, overall_total)
             
             # Apply bin color (override volume colors if bin color is set)
             if bin_.color is not None:
@@ -182,24 +241,50 @@ def export_bins_to_meshes(
             all_vertices, all_faces, all_colors
         )
         
-        # Save combined mesh
+        # Switch to saving files phase
+        if phase_progress_callback:
+            phase = "Saving files"
+            phase_current = 0
+            phase_total = 1  # Only one file for combined mode
+            overall_current = total * 2
+            phase_progress_callback(phase, 0, phase_total, overall_total)
+        
+        # Save combined mesh (this can take time for large meshes)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        out_path = output_dir / f"{filename_prefix}_combined.ply"
-        meshing_mod.save_mesh_ply(out_path, combined_verts, combined_faces, combined_colors, opacity=opacity)
+        
+        format_upper = format_name.upper()
+        
+        # Create progress callback for file saving based on file size
+        def file_save_progress_cb(bytes_written: int, total_bytes: int) -> None:
+            if phase_progress_callback:
+                # For combined mode, we only have one file, so progress is just bytes_written / total_bytes
+                file_progress = bytes_written / max(total_bytes, 1)
+                phase_current = int(file_progress)
+                phase_progress_callback(phase, phase_current, 1, overall_total)
+        
+        if format_upper == "STL":
+            out_path = output_dir / f"{filename_prefix}_combined.stl"
+            meshing_mod.save_mesh_stl(out_path, combined_verts, combined_faces, binary=stl_binary)
+        else:  # Default to PLY
+            out_path = output_dir / f"{filename_prefix}_combined.ply"
+            meshing_mod.save_mesh_ply(out_path, combined_verts, combined_faces, combined_colors, opacity=opacity, progress_callback=file_save_progress_cb)
         
         if progress_callback:
             progress_callback(total, total)
+        
+        if phase_progress_callback:
+            phase_progress_callback(phase, 1, 1, overall_total)
         
         return [out_path]
     
     else:  # export_mode == "separate"
         # Use existing function which exports each bin separately
-        # Currently only PLY is implemented
-        if format_name.upper() != "PLY":
+        format_upper = format_name.upper()
+        if format_upper not in ("PLY", "STL"):
             raise ValueError(
                 f"Format '{format_name}' is not yet implemented. "
-                "Currently only PLY format is supported for separate file export."
+                "Currently only PLY and STL formats are supported for separate file export."
             )
         
         config.output_dir = output_dir
@@ -211,5 +296,7 @@ def export_bins_to_meshes(
             volume_color=volume_color,
             progress_callback=progress_callback,
             phase_progress_callback=phase_progress_callback,
+            export_format=format_upper,
+            stl_binary=stl_binary,
         )
 

@@ -114,8 +114,19 @@ class MainWindow(QMainWindow):
 
     def _create_central_tabs(self) -> None:
         tabs = QTabWidget(self)
-        tabs.setDocumentMode(True)
+        tabs.setDocumentMode(True)  # Keep document mode for original look
         tabs.setTabPosition(QTabWidget.North)
+        
+        # Make tabs more visible with subtle styling that preserves original colors
+        tabs.setStyleSheet("""
+            QTabBar::tab {
+                padding: 10px 20px;
+                margin-right: 2px;
+                font-size: 12pt;
+                font-weight: bold;
+                min-width: 150px;
+            }
+        """)
 
         self.preproc_tab = PreprocessingTab(status=self.status_controller, parent=self)
         self.meshing_tab = MeshingTab(status=self.status_controller, parent=self)
