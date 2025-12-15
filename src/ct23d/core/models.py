@@ -86,6 +86,13 @@ class PreprocessConfig:
     This is more aggressive than overlay removal - it completely removes color.
     Uses the saturation_threshold parameter to determine what counts as non-grayscale.
     """
+    
+    remove_overlays: bool = True
+    """
+    If True, automatically remove colored overlays (text, markers) by converting them to grayscale.
+    This is the default behavior that converts colored pixels to grayscale based on saturation threshold.
+    If False, preserves original colors (useful for JPEG images that should remain colored).
+    """
 
     object_mask: Optional[np.ndarray] = None
     """
@@ -135,6 +142,20 @@ class PreprocessConfig:
     """
     Optional tuple (min_slice, max_slice) for export slice range (0-based, inclusive).
     If None, all processed slices are exported.
+    """
+    
+    export_prefix: Optional[str] = None
+    """
+    Optional prefix for exported filenames. If provided, exported files will be named
+    as "{export_prefix}_{index:05d}.{ext}" where index follows the Z order (0, 1, 2, ...).
+    If None, original filenames are preserved.
+    """
+    
+    reordered_slice_paths: Optional[List[Path]] = None
+    """
+    Optional list of slice paths in Z order (sorted by actual Z position from DICOM metadata).
+    If provided, preprocessing will use this order instead of alphabetical filename sorting.
+    If None, uses alphabetical sorting of filenames.
     """
 
 

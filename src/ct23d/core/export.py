@@ -108,12 +108,14 @@ def export_bins_to_meshes(
     if opacity is not None:
         config.opacity = opacity
     
-    # Convert to grayscale if needed
+    # Convert to intensity if needed (using max channel for better preservation
+    # of information from colored overlays in medical imaging)
     if volume.ndim == 4 and volume.shape[-1] == 3:
-        volume_gray = volmod.to_grayscale(volume)
+        volume_gray = volmod.to_intensity_max(volume)
         volume_color = volume
     elif volume.ndim == 3:
-        volume_gray = volume.astype(np.uint8)
+        # Preserve dtype (don't cast uint16 to uint8 for DICOM data)
+        volume_gray = volume
         volume_color = None
     else:
         raise ValueError(f"Volume must be 3D or 4D, got shape {volume.shape}")

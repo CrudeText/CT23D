@@ -17,7 +17,9 @@ dependencies = [
     "imageio",
     "trimesh",
     "PySide6",
+    "pyqtgraph",
     "pyyaml",
+    "pydicom",
 ]
 
 [project.optional-dependencies]

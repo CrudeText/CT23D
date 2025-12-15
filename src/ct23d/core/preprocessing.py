@@ -10,7 +10,7 @@ from . import images
 
 
 # Allowed image extensions
-_IMAGE_EXTS = [".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"]
+_IMAGE_EXTS = [".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".dcm", ".dicom"]
 
 
 def _ensure_dir(path: Path) -> None:
@@ -92,7 +92,11 @@ def preprocess_slices(
     # ------------------------------------------------------------------
     # 1. Load raw slices FROM INPUT DIR
     # ------------------------------------------------------------------
-    slice_paths: List[Path] = _list_image_files(input_dir)
+    # Use reordered paths if provided, otherwise use alphabetical sorting
+    if cfg.reordered_slice_paths is not None:
+        slice_paths: List[Path] = cfg.reordered_slice_paths
+    else:
+        slice_paths: List[Path] = _list_image_files(input_dir)
     total = len(slice_paths)
 
     # Load all images as RGB numpy arrays with rotation (with progress)
@@ -147,6 +151,7 @@ def preprocess_slices(
         saturation_threshold=cfg.saturation_threshold,
         remove_bed=cfg.remove_bed,
         remove_non_grayscale=cfg.remove_non_grayscale,  # Legacy flag
+        remove_overlays=cfg.remove_overlays,  # Control automatic overlay removal (grayscale conversion)
         object_mask=cfg.object_mask,  # Legacy support
         object_mask_slice_index=cfg.object_mask_slice_index,  # Legacy support
         non_grayscale_slice_ranges=cfg.non_grayscale_slice_ranges,  # New: slice ranges for non-grayscale removal
@@ -179,10 +184,25 @@ def preprocess_slices(
         if progress_cb is not None:
             progress_cb("saving", export_idx, export_total, export_total)
 
-        src_path = slice_paths[z_idx]
         slice_arr = processed_volume[z_idx]
-        out_path = processed_dir / src_path.name
-        images.save_image_rgb(out_path, slice_arr)
+        
+        # Determine output filename
+        if cfg.export_prefix is not None:
+            # Use prefix + sequential index based on Z order (0-based: 0, 1, 2, ...)
+            src_path = slice_paths[z_idx]
+            ext = src_path.suffix
+            # Sequential numbering follows the Z order (0, 1, 2, ...)
+            sequential_index = export_idx - 1  # Convert from 1-based to 0-based
+            out_filename = f"{cfg.export_prefix}_{sequential_index:05d}{ext}"
+            out_path = processed_dir / out_filename
+        else:
+            # Preserve original filename
+            src_path = slice_paths[z_idx]
+            out_path = processed_dir / src_path.name
+        
+        # If original was DICOM, pass it as reference to preserve metadata
+        reference_dicom = src_path if images._is_dicom_file(src_path) else None
+        images.save_image_rgb(out_path, slice_arr, reference_dicom=reference_dicom)
     
     if progress_cb is not None:
         progress_cb("saving", export_total, export_total, export_total)  # Mark saving as complete

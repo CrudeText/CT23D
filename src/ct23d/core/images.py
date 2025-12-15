@@ -18,8 +18,14 @@ from typing import Callable, Iterable, List, Optional, Union
 import numpy as np
 from PIL import Image
 
+try:
+    import pydicom
+    HAS_PYDICOM = True
+except ImportError:
+    HAS_PYDICOM = False
+
 # Allowed extensions for slice images
-_IMAGE_EXTS = [".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"]
+_IMAGE_EXTS = [".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".dcm", ".dicom"]
 
 PathLikeOrList = Union[Path, Iterable[Union[Path, str]]]
 
@@ -68,9 +74,120 @@ def list_slice_files(source: PathLikeOrList) -> List[Path]:
 # -------------------------------------------------------------------------
 # Image IO
 # -------------------------------------------------------------------------
+def _is_dicom_file(path: Path) -> bool:
+    """Check if a file is a DICOM file based on extension."""
+    return path.suffix.lower() in [".dcm", ".dicom"]
+
+
+def get_dicom_z_position(path: Path) -> Optional[float]:
+    """
+    Extract Z position from a DICOM file.
+    
+    Parameters
+    ----------
+    path : Path
+        Path to DICOM file
+        
+    Returns
+    -------
+    Optional[float]
+        Z position (ImagePositionPatient[2] or SliceLocation), or None if not available
+    """
+    if not HAS_PYDICOM:
+        return None
+    
+    if not _is_dicom_file(path):
+        return None
+    
+    try:
+        ds = pydicom.dcmread(str(path), stop_before_pixels=True)  # Read metadata only
+        
+        # Try ImagePositionPatient first (most accurate - 3D position)
+        if hasattr(ds, 'ImagePositionPatient') and ds.ImagePositionPatient is not None:
+            if len(ds.ImagePositionPatient) >= 3:
+                return float(ds.ImagePositionPatient[2])  # Z coordinate
+        
+        # Fallback to SliceLocation
+        if hasattr(ds, 'SliceLocation') and ds.SliceLocation is not None:
+            return float(ds.SliceLocation)
+        
+        # Fallback to InstanceNumber (less reliable but sometimes works)
+        if hasattr(ds, 'InstanceNumber') and ds.InstanceNumber is not None:
+            return float(ds.InstanceNumber)
+        
+        return None
+    except Exception:
+        return None
+
+
+def _load_dicom_image(path: Path, rotation: int = 0) -> np.ndarray:
+    """
+    Load a DICOM file as a grayscale array preserving full intensity range.
+    
+    Parameters
+    ----------
+    path : Path
+        Path to DICOM file
+    rotation : int
+        Rotation angle in degrees (0, 90, 180, 270). Positive = clockwise.
+        
+    Returns
+    -------
+    np.ndarray
+        Grayscale image array, shape (Y, X), dtype uint16 or int16 depending on data
+    """
+    if not HAS_PYDICOM:
+        raise ImportError(
+            "pydicom is required to load DICOM files. "
+            "Install it with: pip install pydicom"
+        )
+    
+    ds = pydicom.dcmread(str(path))
+    
+    # Get pixel array
+    pixel_array = ds.pixel_array
+    
+    # Handle different data types
+    if pixel_array.dtype == np.uint16:
+        arr = pixel_array.astype(np.uint16)
+    elif pixel_array.dtype == np.int16:
+        arr = pixel_array.astype(np.int16)
+    elif pixel_array.dtype == np.uint8:
+        arr = pixel_array.astype(np.uint16)  # Promote to uint16 for consistency
+    else:
+        # Convert to uint16, handling signed/unsigned appropriately
+        if pixel_array.dtype.kind == 'i':  # signed integer
+            # Shift to make it non-negative if needed
+            arr_min = pixel_array.min()
+            if arr_min < 0:
+                arr = (pixel_array - arr_min).astype(np.uint16)
+            else:
+                arr = pixel_array.astype(np.uint16)
+        else:
+            arr = pixel_array.astype(np.uint16)
+    
+    # Apply rotation if needed
+    if rotation != 0:
+        # Use scipy for rotation to preserve dtype
+        from scipy.ndimage import rotate
+        # scipy rotates counter-clockwise, so negate
+        arr = rotate(arr, -rotation, reshape=False, order=1, mode='constant', cval=0)
+        # Ensure dtype is preserved
+        if pixel_array.dtype == np.int16:
+            arr = arr.astype(np.int16)
+        else:
+            arr = arr.astype(np.uint16)
+    
+    return arr
+
+
 def load_image_rgb(path: Path, rotation: int = 0) -> np.ndarray:
     """
-    Load an image as an RGB numpy array with dtype uint8.
+    Load an image as an RGB numpy array.
+    
+    For standard image formats (PNG, JPG, etc.), returns uint8 RGB array.
+    For DICOM files, returns uint16 RGB array (grayscale replicated to 3 channels)
+    preserving the full intensity range.
     
     Parameters
     ----------
@@ -82,8 +199,19 @@ def load_image_rgb(path: Path, rotation: int = 0) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        RGB image array, shape (Y, X, 3), dtype uint8
+        RGB image array, shape (Y, X, 3)
+        - dtype uint8 for standard image formats
+        - dtype uint16 for DICOM files (preserves full intensity range)
     """
+    # Check if it's a DICOM file
+    if _is_dicom_file(path):
+        # Load DICOM as grayscale with full intensity range
+        gray = _load_dicom_image(path, rotation=rotation)
+        # Replicate to RGB channels, preserving dtype
+        arr = np.stack([gray, gray, gray], axis=-1)
+        return arr
+    
+    # Standard image format - use PIL
     with Image.open(path) as im:
         im = im.convert("RGB")
         if rotation != 0:
@@ -100,30 +228,179 @@ def rotate_image_rgb(arr: np.ndarray, rotation: int) -> np.ndarray:
     Parameters
     ----------
     arr : np.ndarray
-        RGB image array, shape (Y, X, 3), dtype uint8
+        RGB image array, shape (Y, X, 3), dtype uint8, uint16, or int16
     rotation : int
         Rotation angle in degrees (0, 90, 180, 270). Positive = clockwise.
         
     Returns
     -------
     np.ndarray
-        Rotated RGB image array, same shape/dtype
+        Rotated RGB image array, same shape/dtype as input
+        For uint16/int16, preserves dtype; for uint8, returns uint8
     """
-    from PIL import Image
-    im = Image.fromarray(arr, mode="RGB")
-    # PIL rotates counter-clockwise, so negate
-    im = im.rotate(-rotation, expand=False)
-    return np.array(im, dtype=np.uint8)
+    if rotation == 0:
+        return arr.copy()
+    
+    # For uint8, use PIL (fast and good quality)
+    if arr.dtype == np.uint8:
+        from PIL import Image
+        im = Image.fromarray(arr, mode="RGB")
+        # PIL rotates counter-clockwise, so negate
+        im = im.rotate(-rotation, expand=False)
+        return np.array(im, dtype=np.uint8)
+    
+    # For uint16/int16 (DICOM), use scipy to preserve dtype
+    from scipy.ndimage import rotate
+    
+    # scipy rotates counter-clockwise, so negate
+    # Rotate each channel separately to preserve RGB structure
+    rotated_channels = []
+    for channel_idx in range(3):
+        channel = arr[:, :, channel_idx]
+        rotated_channel = rotate(
+            channel, 
+            -rotation, 
+            reshape=False, 
+            order=1,  # Bilinear interpolation
+            mode='constant', 
+            cval=0
+        )
+        rotated_channels.append(rotated_channel)
+    
+    # Stack channels back together
+    rotated = np.stack(rotated_channels, axis=-1)
+    
+    # Preserve original dtype
+    return rotated.astype(arr.dtype, copy=False)
 
 
-def save_image_rgb(path: Path, arr: np.ndarray) -> None:
+def save_image_dicom(path: Path, arr: np.ndarray, reference_dicom: Optional[Path] = None) -> None:
     """
-    Save a 3-channel uint8 numpy array to an image file.
+    Save an array as a DICOM file.
+    
+    Parameters
+    ----------
+    path : Path
+        Output DICOM file path
+    arr : np.ndarray
+        Image array, shape (Y, X) or (Y, X, 3). If RGB, converts to grayscale.
+        Should be uint16 or int16 to preserve full intensity range.
+    reference_dicom : Optional[Path]
+        Optional reference DICOM file to copy metadata from. If None, creates minimal DICOM.
     """
-    if arr.dtype != np.uint8:
-        arr = arr.astype(np.uint8, copy=False)
+    if not HAS_PYDICOM:
+        raise ImportError(
+            "pydicom is required to save DICOM files. "
+            "Install it with: pip install pydicom"
+        )
+    
+    # Convert to grayscale if RGB
+    if arr.ndim == 3 and arr.shape[-1] == 3:
+        # Use mean of RGB channels
+        arr = arr.mean(axis=-1).astype(arr.dtype)
+    
+    # Ensure appropriate dtype for DICOM
+    if arr.dtype == np.uint8:
+        arr = arr.astype(np.uint16)  # Promote to uint16
+    elif arr.dtype not in (np.uint16, np.int16):
+        arr = arr.astype(np.uint16)
+    
+    # Create or load DICOM dataset
+    if reference_dicom is not None and reference_dicom.exists():
+        ds = pydicom.dcmread(str(reference_dicom))
+        # Ensure file meta information exists
+        if not hasattr(ds, 'file_meta') or ds.file_meta is None:
+            ds.file_meta = pydicom.dataset.FileMetaDataset()
+            ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+    else:
+        # Create minimal DICOM dataset
+        ds = pydicom.Dataset()
+        ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.1"  # CT Image Storage
+        ds.SOPInstanceUID = pydicom.uid.generate_uid()
+        ds.Modality = "CT"
+        ds.PatientName = ""
+        ds.PatientID = ""
+        ds.StudyInstanceUID = pydicom.uid.generate_uid()
+        ds.SeriesInstanceUID = pydicom.uid.generate_uid()
+        ds.InstanceNumber = "1"
+        
+        # Set file meta information with Transfer Syntax UID
+        ds.file_meta = pydicom.dataset.FileMetaDataset()
+        ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        ds.is_implicit_VR = False
+        ds.is_little_endian = True
+    
+    # Set pixel data
+    ds.PixelData = arr.tobytes()
+    ds.Rows = arr.shape[0]
+    ds.Columns = arr.shape[1]
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.BitsAllocated = 16
+    ds.BitsStored = 16
+    ds.HighBit = 15
+    ds.PixelRepresentation = 0 if arr.dtype == np.uint16 else 1
+    
+    # Save with explicit encoding parameters
+    ds.save_as(str(path), write_like_original=False)
 
-    im = Image.fromarray(arr, mode="RGB")
+
+def save_image_rgb(path: Path, arr: np.ndarray, reference_dicom: Optional[Path] = None) -> None:
+    """
+    Save an image array to a file.
+    
+    For standard image formats (PNG, JPG, etc.), saves as uint8 RGB.
+    For DICOM files (.dcm, .dicom), saves preserving full intensity range.
+    
+    Parameters
+    ----------
+    path : Path
+        Output file path
+    arr : np.ndarray
+        Image array, shape (Y, X, 3) for RGB or (Y, X) for grayscale
+        Can be uint8 (standard images) or uint16/int16 (DICOM)
+    reference_dicom : Optional[Path]
+        Optional reference DICOM file for metadata (only used when saving DICOM)
+    """
+    # Check if output should be DICOM
+    if _is_dicom_file(path):
+        save_image_dicom(path, arr, reference_dicom=reference_dicom)
+        return
+    
+    # Standard image format - convert to uint8 if needed
+    if arr.ndim == 3 and arr.shape[-1] == 3:
+        # RGB array
+        if arr.dtype != np.uint8:
+            # Normalize to uint8 range
+            if arr.dtype in (np.uint16, np.int16):
+                # Preserve relative intensities by scaling to 0-255
+                arr_min = arr.min()
+                arr_max = arr.max()
+                if arr_max > arr_min:
+                    arr = ((arr.astype(np.float32) - arr_min) / (arr_max - arr_min) * 255).astype(np.uint8)
+                else:
+                    arr = np.zeros_like(arr, dtype=np.uint8)
+            else:
+                arr = arr.astype(np.uint8, copy=False)
+        im = Image.fromarray(arr, mode="RGB")
+    else:
+        # Grayscale array
+        if arr.dtype != np.uint8:
+            # Normalize to uint8 range
+            if arr.dtype in (np.uint16, np.int16):
+                arr_min = arr.min()
+                arr_max = arr.max()
+                if arr_max > arr_min:
+                    arr = ((arr.astype(np.float32) - arr_min) / (arr_max - arr_min) * 255).astype(np.uint8)
+                else:
+                    arr = np.zeros_like(arr, dtype=np.uint8)
+            else:
+                arr = arr.astype(np.uint8, copy=False)
+        im = Image.fromarray(arr, mode="L")
+        im = im.convert("RGB")
+    
     im.save(path)
 
 
@@ -144,12 +421,24 @@ def load_slices_to_volume(source: PathLikeOrList) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Array of shape (Z, Y, X, 3), dtype uint8.
+        Array of shape (Z, Y, X, 3)
+        - dtype uint8 for standard image formats
+        - dtype uint16 for DICOM files (preserves full intensity range)
     """
     slice_paths = list_slice_files(source)
     slices = [load_image_rgb(p) for p in slice_paths]
-    volume = np.stack(slices, axis=0)  # (Z, Y, X, 3)
-    return volume.astype(np.uint8, copy=False)
+    
+    # Check if any slices are DICOM (uint16)
+    has_dicom = any(s.dtype == np.uint16 for s in slices)
+    
+    if has_dicom:
+        # Ensure all slices are uint16 (promote uint8 if mixed)
+        slices = [s.astype(np.uint16) if s.dtype == np.uint8 else s for s in slices]
+        volume = np.stack(slices, axis=0)  # (Z, Y, X, 3)
+        return volume.astype(np.uint16, copy=False)
+    else:
+        volume = np.stack(slices, axis=0)  # (Z, Y, X, 3)
+        return volume.astype(np.uint8, copy=False)
 
 
 # -------------------------------------------------------------------------
@@ -195,7 +484,11 @@ def _remove_colored_overlays(
     new_arr[full_mask, 1] = gray[full_mask]
     new_arr[full_mask, 2] = gray[full_mask]
 
-    return new_arr.astype(np.uint8)
+    # Preserve original dtype
+    if arr.dtype == np.uint16:
+        return new_arr.astype(np.uint16)
+    else:
+        return new_arr.astype(np.uint8)
 
 
 def _remove_bed_placeholder(rgb: np.ndarray) -> np.ndarray:
@@ -234,13 +527,14 @@ def auto_detect_bed_headrest(
     Parameters
     ----------
     rgb : np.ndarray
-        RGB image array, shape (Y, X, 3), dtype uint8
+        RGB image array, shape (Y, X, 3), dtype uint8 or uint16
     bottom_region_ratio : float
         Fraction of image height to start scanning from bottom (0-1)
         Default 0.4 means start from bottom 40% and scan upward
     min_intensity : int
-        Minimum grayscale intensity to consider (0-255)
+        Minimum grayscale intensity to consider (0-255 for uint8, scaled for uint16)
         Default 150 (bright, but not requiring pure white)
+        For uint16 (DICOM), this is automatically scaled proportionally
     min_size_ratio : float
         Minimum object size as fraction of image area (0-1)
         Default 0.01 (1% of image) - catches smaller bed parts
@@ -250,8 +544,9 @@ def auto_detect_bed_headrest(
     scan_upward : bool
         If True, scan from bottom upward to find all bed components
     grey_tolerance : int
-        Intensity difference tolerance for including grey pixels around bed (0-255)
+        Intensity difference tolerance for including grey pixels around bed (0-255 for uint8, scaled for uint16)
         Default 30 - includes pixels within 30 grayscale units of bed intensity
+        For uint16 (DICOM), this is automatically scaled proportionally
         
     Returns
     -------
@@ -269,14 +564,24 @@ def auto_detect_bed_headrest(
     height, width = gray.shape
     total_pixels = height * width
     
+    # Detect intensity range and scale thresholds accordingly
+    # For uint16 (DICOM), scale thresholds proportionally
+    max_possible = 255.0 if rgb.dtype == np.uint8 else 65535.0
+    scale_factor = max_possible / 255.0
+    
+    # Scale thresholds for uint16
+    scaled_min_intensity = min_intensity * scale_factor
+    scaled_grey_tolerance = grey_tolerance * scale_factor
+    scaled_black_threshold = 10.0 * scale_factor
+    
     # Remove black background
-    black_mask = gray < 10
+    black_mask = gray < scaled_black_threshold
     
     # Start from bottom and scan upward
     bottom_start = int(height * (1 - bottom_region_ratio))
     
     # Create mask for bright objects (bed/headrest is typically bright white)
-    bright_mask = gray >= min_intensity
+    bright_mask = gray >= scaled_min_intensity
     bright_mask = bright_mask & ~black_mask
     
     if np.sum(bright_mask) == 0:
@@ -384,12 +689,12 @@ def auto_detect_bed_headrest(
             # Use a wider tolerance to catch more grey noise, including dark greys
             # Include all non-black, non-bright pixels that are near the bed intensity range
             # Apply aggressivity multiplier
-            grey_tolerance_extended = int((grey_tolerance + 80) * aggressivity)  # Even more aggressive tolerance for dark greys
+            grey_tolerance_extended = (scaled_grey_tolerance + 80 * scale_factor) * aggressivity  # Even more aggressive tolerance for dark greys
             grey_mask = (
-                (gray >= max(20, bed_min_intensity - grey_tolerance_extended)) &  # Include darker greys (but not black)
+                (gray >= max(20 * scale_factor, bed_min_intensity - grey_tolerance_extended)) &  # Include darker greys (but not black)
                 (gray <= bed_max_intensity + grey_tolerance_extended) &
                 ~black_mask &
-                (gray < min_intensity)  # Only grey, not bright white
+                (gray < scaled_min_intensity)  # Only grey, not bright white
             )
             
             # Dilate bed mask extremely aggressively to include nearby grey pixels (scaled by aggressivity)
@@ -489,7 +794,11 @@ def _remove_non_grayscale(rgb: np.ndarray, threshold: float = 0.08) -> np.ndarra
     result[non_grayscale_mask, 1] = 0
     result[non_grayscale_mask, 2] = 0
     
-    return result.astype(np.uint8)
+    # Preserve original dtype
+    if arr.dtype == np.uint16:
+        return result.astype(np.uint16)
+    else:
+        return result.astype(np.uint8)
 
 
 def _apply_object_mask(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -518,7 +827,7 @@ def _find_overlapping_objects_in_slice(
     target_slice: np.ndarray,
     min_overlap_ratio: float = 0.1,
     include_bright_objects: bool = True,
-    bright_threshold: int = 150,
+    bright_threshold: Optional[int] = None,
     grey_tolerance: int = 30,
 ) -> np.ndarray:
     """
@@ -563,8 +872,19 @@ def _find_overlapping_objects_in_slice(
     
     target_gray = to_gray(target_slice)
     
+    # Detect intensity range and scale thresholds accordingly
+    max_possible = 255.0 if target_slice.dtype == np.uint8 else 65535.0
+    scale_factor = max_possible / 255.0
+    
+    # Scale thresholds for uint16
+    if bright_threshold is None:
+        bright_threshold = 150  # Default
+    scaled_bright_threshold = bright_threshold * scale_factor
+    scaled_grey_tolerance = grey_tolerance * scale_factor
+    scaled_black_threshold = 10.0 * scale_factor
+    
     # Remove black background from consideration
-    black_mask = target_gray < 10
+    black_mask = target_gray < scaled_black_threshold
     
     # Dilate reference mask to account for shifts and find nearby objects
     # Reduced iterations for speed (was 10, now 8)
@@ -607,7 +927,7 @@ def _find_overlapping_objects_in_slice(
     
     # Second: Find bright white objects that overlap with reference (new bed objects)
     if include_bright_objects:
-        bright_mask = target_gray >= bright_threshold
+        bright_mask = target_gray >= scaled_bright_threshold
         bright_mask = bright_mask & ~black_mask
         
         if np.sum(bright_mask) > 0:
@@ -653,12 +973,12 @@ def _find_overlapping_objects_in_slice(
             
             # Find grey pixels near object intensity (within tolerance)
             # Be more aggressive - include darker greys and extend tolerance
-            grey_tolerance_extended = grey_tolerance + 60  # More aggressive for dark greys
+            grey_tolerance_extended = scaled_grey_tolerance + 60 * scale_factor  # More aggressive for dark greys
             grey_mask = (
-                (target_gray >= max(15, obj_min_intensity - grey_tolerance_extended)) &  # Include darker greys
+                (target_gray >= max(15 * scale_factor, obj_min_intensity - grey_tolerance_extended)) &  # Include darker greys
                 (target_gray <= obj_max_intensity + grey_tolerance_extended) &
                 ~black_mask &
-                (target_gray < bright_threshold)  # Only grey, not bright white
+                (target_gray < scaled_bright_threshold)  # Only grey, not bright white
             )
             
             # Dilate result mask to include nearby grey pixels
@@ -724,6 +1044,7 @@ def preprocess_volume_rgb(
     saturation_threshold: float,
     remove_bed: bool,
     remove_non_grayscale: bool = False,
+    remove_overlays: bool = True,  # New: control automatic overlay removal (grayscale conversion)
     object_mask: Optional[np.ndarray] = None,
     object_mask_slice_index: Optional[int] = None,
     non_grayscale_slice_ranges: Optional[List[Tuple[int, int]]] = None,  # List of (min, max) slice ranges for non-grayscale removal
@@ -733,7 +1054,7 @@ def preprocess_volume_rgb(
     """
     Apply preprocessing steps slice-by-slice:
 
-      - Overlay removal
+      - (Optional) Overlay removal (converts colored overlays to grayscale)
       - (Optional) bed removal
       - (Optional) remove non-grayscale pixels
       - (Optional) remove selected objects using mask tracking
@@ -741,12 +1062,15 @@ def preprocess_volume_rgb(
     Parameters
     ----------
     volume_rgb : np.ndarray
-        Shape (Z, Y, X, 3), dtype uint8
+        Shape (Z, Y, X, 3), dtype uint8 or uint16
     grayscale_tolerance : int
     saturation_threshold : float
     remove_bed : bool
     remove_non_grayscale : bool
         If True, turn all non-grayscale pixels black
+    remove_overlays : bool
+        If True, automatically remove colored overlays (text, markers) by converting them to grayscale.
+        If False, preserves original colors. Default is True (original behavior).
     object_mask : Optional[np.ndarray]
         Optional 2D boolean mask (Y, X) for selected slice to remove objects.
         Will be tracked across Z-stack using object matching.
@@ -831,11 +1155,15 @@ def preprocess_volume_rgb(
         if z_idx in non_grayscale_slices:
             rgb = _remove_non_grayscale(rgb, threshold=saturation_threshold)
         
-        cleaned = _remove_colored_overlays(
-            rgb,
-            grayscale_tolerance=grayscale_tolerance,
-            saturation_threshold=saturation_threshold,
-        )
+        # Only apply overlay removal (grayscale conversion) if enabled
+        if remove_overlays:
+            cleaned = _remove_colored_overlays(
+                rgb,
+                grayscale_tolerance=grayscale_tolerance,
+                saturation_threshold=saturation_threshold,
+            )
+        else:
+            cleaned = rgb.copy()
 
         if remove_bed:
             cleaned = _remove_bed_placeholder(cleaned)

@@ -44,9 +44,12 @@ def build_global_mask(
         Boolean mask [Z, Y, X] where True means foreground.
     """
     if volume_color.ndim == 4 and volume_color.shape[-1] == 3:
-        gray = volmod.to_grayscale(volume_color)
+        # Use max intensity instead of luminance to preserve information
+        # from colored overlays in medical imaging
+        gray = volmod.to_intensity_max(volume_color)
     elif volume_color.ndim == 3:
-        gray = volume_color.astype(np.uint8)
+        # Preserve dtype (don't cast uint16 to uint8)
+        gray = volume_color
     else:
         raise ValueError(
             f"build_global_mask expects [Z, Y, X] or [Z, Y, X, 3], got {volume_color.shape}"
@@ -56,7 +59,14 @@ def build_global_mask(
     smooth = gaussian_filter(gray.astype(np.float32), sigma=cfg.smoothing_sigma)
 
     # Threshold: foreground = intensities above non_black_threshold
-    mask = smooth > float(cfg.non_black_threshold)
+    # Scale threshold based on dtype: uint16 data needs higher threshold
+    if gray.dtype == np.uint16:
+        # Scale uint8 threshold (15) to uint16 range (0-65535)
+        # 15/255 ≈ 0.059, so for uint16: 0.059 * 65535 ≈ 3848
+        threshold = float(cfg.non_black_threshold) * (65535.0 / 255.0)
+    else:
+        threshold = float(cfg.non_black_threshold)
+    mask = smooth > threshold
 
     # Morphological cleanup
     mask = binary_closing(mask, iterations=2)
@@ -66,9 +76,11 @@ def build_global_mask(
     mask = morphology.remove_small_objects(mask, min_size=cfg.min_component_size)
 
     if np.count_nonzero(mask) == 0:
+        dtype_info = f" (dtype: {gray.dtype}, threshold used: {threshold:.1f})"
         raise RuntimeError(
-            "Global mask is empty after cleaning. "
-            "Try lowering 'non_black_threshold' or 'min_component_size'."
+            f"Global mask is empty after cleaning.{dtype_info}\n"
+            "Try lowering 'non_black_threshold' or 'min_component_size'. "
+            "For uint16 DICOM data, the threshold is automatically scaled from the uint8 default."
         )
 
     return mask
@@ -834,12 +846,14 @@ def generate_meshes_from_volume(
     List[Path]
         Paths to generated PLY files
     """
-    # Convert to grayscale if needed
+    # Convert to intensity if needed (using max channel for better preservation
+    # of information from colored overlays in medical imaging)
     if volume.ndim == 4 and volume.shape[-1] == 3:
-        volume_gray = volmod.to_grayscale(volume)
+        volume_gray = volmod.to_intensity_max(volume)
         volume_color = volume
     elif volume.ndim == 3:
-        volume_gray = volume.astype(np.uint8)
+        # Preserve dtype (don't cast uint16 to uint8 for DICOM data)
+        volume_gray = volume
         volume_color = None
     else:
         raise ValueError(f"Volume must be 3D or 4D, got shape {volume.shape}")

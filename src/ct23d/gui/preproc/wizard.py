@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import re
 import uuid
 
 import numpy as np
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QRadioButton,
     QSlider,
+    QLineEdit,
 )
 from PySide6.QtCore import QPoint, QRect
 
@@ -71,10 +73,16 @@ class AutoDetectSettingsDialog(QDialog):
         )
         form_layout.addRow("Grey Tolerance:", self.grey_tolerance_spin)
         
-        # Minimum intensity
+        # Minimum intensity - updated based on dtype
         self.min_intensity_spin = QSpinBox()
-        self.min_intensity_spin.setRange(100, 255)
-        self.min_intensity_spin.setValue(params.get('min_intensity', 150))
+        max_intensity = params.get('max_intensity', 255)
+        # Scale default min_intensity if switching from uint8 to uint16
+        default_min = params.get('min_intensity', 150)
+        if max_intensity == 65535 and default_min <= 255:
+            # Scale from uint8 to uint16
+            default_min = int(round(default_min * (65535.0 / 255.0)))
+        self.min_intensity_spin.setRange(100, max_intensity)
+        self.min_intensity_spin.setValue(default_min)
         self.min_intensity_spin.setToolTip(
             "Minimum intensity for detecting bright objects (bed/headrest).\n"
             "Lower values = detect dimmer objects."
@@ -851,6 +859,34 @@ class PreprocessWizard(QWidget):
             self.remove_non_grayscale_cb.toggled.connect(self._on_non_grayscale_toggled)
             params_layout.addWidget(self.remove_non_grayscale_cb)
             
+            # remove overlays checkbox (automatic grayscale conversion)
+            self.remove_overlays_cb = QCheckBox("Remove colored overlays (convert to grayscale)")
+            self.remove_overlays_cb.setChecked(False)  # Default: disabled (preserve colors)
+            self.remove_overlays_cb.setToolTip(
+                "If enabled, automatically converts colored overlays (text, markers) to grayscale.\n"
+                "Disable this to preserve original colors in JPEG images."
+            )
+            self.remove_overlays_cb.toggled.connect(self.update_preview)
+            params_layout.addWidget(self.remove_overlays_cb)
+            
+            # Slice reordering button
+            reorder_layout = QHBoxLayout()
+            self.reorder_slices_btn = QPushButton("Reorder Slices by Z Position")
+            self.reorder_slices_btn.setToolTip(
+                "Automatically reorder slices based on their Z position (from DICOM metadata).\n"
+                "This ensures slices are processed in correct anatomical order.\n"
+                "For non-DICOM files, uses filename sorting."
+            )
+            self.reorder_slices_btn.setEnabled(False)
+            self.reorder_slices_btn.clicked.connect(self.reorder_slices_by_z_position)
+            reorder_layout.addWidget(self.reorder_slices_btn)
+            reorder_layout.addStretch()
+            params_layout.addLayout(reorder_layout)
+            
+            # Track if slices have been reordered
+            self.slice_reordered = False
+            self.original_image_paths: Optional[List[Path]] = None
+            
             controls_column.addWidget(params_group)
             
             # Object selection controls
@@ -1015,8 +1051,11 @@ class PreprocessWizard(QWidget):
             layout.addWidget(error_label)
 
         # ------------------------------------------------------------------
-        # Export range selection
+        # Export range selection and slice reordering (same row)
         # ------------------------------------------------------------------
+        export_row_layout = QHBoxLayout()
+        
+        # Export Range group
         export_range_group = QGroupBox("Export Range")
         export_range_layout = QHBoxLayout(export_range_group)
         
@@ -1046,7 +1085,46 @@ class PreprocessWizard(QWidget):
         export_range_layout.addWidget(self.export_slice_max_spin)
         
         export_range_layout.addStretch()
-        layout.addWidget(export_range_group)
+        export_row_layout.addWidget(export_range_group)
+        
+        # Slice Reordering group
+        reorder_group = QGroupBox("Slice Reordering")
+        reorder_layout = QHBoxLayout(reorder_group)
+        
+        self.reorder_for_export_cb = QCheckBox("Reorder slices by Z position")
+        self.reorder_for_export_cb.setChecked(False)  # Default: off
+        self.reorder_for_export_cb.setToolTip(
+            "If checked, slices will be processed in Z order during export.\n"
+            "This uses the current in-memory reordering (if any)."
+        )
+        reorder_layout.addWidget(self.reorder_for_export_cb)
+        
+        self.reorder_source_files_btn = QPushButton("Reorder Files in Source Folder")
+        self.reorder_source_files_btn.setToolTip(
+            "Physically rename files in the source folder to match Z order.\n"
+            "⚠️ WARNING: This will modify the original filenames!"
+        )
+        self.reorder_source_files_btn.setEnabled(False)
+        self.reorder_source_files_btn.clicked.connect(self.reorder_files_in_source_folder)
+        reorder_layout.addWidget(self.reorder_source_files_btn)
+        
+        reorder_layout.addStretch()
+        export_row_layout.addWidget(reorder_group)
+        
+        export_row_layout.addStretch()
+        layout.addLayout(export_row_layout)
+        
+        # Export prefix input
+        export_prefix_layout = QHBoxLayout()
+        export_prefix_layout.addWidget(QLabel("Export filename prefix (optional):"))
+        self.export_prefix_input = QLineEdit()
+        self.export_prefix_input.setPlaceholderText("Leave empty to keep original filenames")
+        self.export_prefix_input.setToolTip(
+            "If provided, exported files will be named as '{prefix}_00000.ext', '{prefix}_00001.ext', etc.\n"
+            "The numbers follow the Z order of slices (0, 1, 2, ...)."
+        )
+        export_prefix_layout.addWidget(self.export_prefix_input)
+        layout.addLayout(export_prefix_layout)
         
         # ------------------------------------------------------------------
         # Export button
@@ -1154,6 +1232,11 @@ class PreprocessWizard(QWidget):
         # Disable cache if we have object masks or rotation, since those change the output
         use_cache = (combined_mask is None and self.image_rotation == 0)
         
+        # Get export prefix (empty string means None)
+        export_prefix = self.export_prefix_input.text().strip()
+        if not export_prefix:
+            export_prefix = None
+        
         cfg = PreprocessConfig(
             input_dir=self.input_dir,
             processed_dir=self.output_dir,
@@ -1162,6 +1245,7 @@ class PreprocessWizard(QWidget):
             saturation_threshold=self.sat_spin.value(),
             remove_bed=False,  # Removed - use object selection instead
             remove_non_grayscale=len(non_grayscale_objects) > 0,  # Legacy flag
+            remove_overlays=self.remove_overlays_cb.isChecked(),  # Use checkbox value
             object_mask=combined_mask,  # Legacy support
             object_mask_slice_index=mask_slice_index,  # Legacy support
             rotation=self.image_rotation,  # Apply rotation during preprocessing
@@ -1169,6 +1253,8 @@ class PreprocessWizard(QWidget):
             object_removal_objects=removal_objects,  # List of removal objects with masks and slice ranges
             non_grayscale_slice_ranges=non_grayscale_ranges if non_grayscale_ranges else None,  # Slice ranges for non-grayscale removal
             export_slice_range=export_slice_range,  # Export slice range
+            export_prefix=export_prefix,  # Export filename prefix
+            reordered_slice_paths=self.image_paths if (self.slice_reordered or self.reorder_for_export_cb.isChecked()) else None,  # Use reordered paths if reordered or checkbox is checked
         )
 
         project = ProjectConfig(
@@ -1287,9 +1373,18 @@ class PreprocessWizard(QWidget):
                 self.visualize_black_btn.setEnabled(True)
                 self.select_black_btn.setEnabled(True)
                 self.start_crop_btn.setEnabled(True)
+                self.reorder_slices_btn.setEnabled(True)
+                self.reorder_source_files_btn.setEnabled(True)
+                
+                # Reset reordering state when loading new directory
+                self.slice_reordered = False
+                self.original_image_paths = None
                 # Note: Slice ranges are now managed in the modifications table
                 if len(self.selected_objects) > 0:
                     self.clear_selection_btn.setEnabled(True)
+                
+                # Detect image dtype and update intensity range controls
+                self._update_intensity_ranges_for_dtype()
                 
                 # Set current image index and update selector
                 self.current_image_index = middle_idx - 1  # Convert to 0-indexed
@@ -1359,8 +1454,22 @@ class PreprocessWizard(QWidget):
         if channels != 3:
             raise ValueError(f"Expected 3 channels, got {channels}")
         
-        # Ensure array is contiguous and uint8
-        arr_copy = np.ascontiguousarray(arr, dtype=np.uint8)
+        # Convert to uint8 for display (QImage requires uint8)
+        if arr.dtype == np.uint8:
+            arr_copy = np.ascontiguousarray(arr, dtype=np.uint8)
+        elif arr.dtype in (np.uint16, np.int16):
+            # Normalize uint16/int16 to uint8 for display
+            # Preserve relative intensities by scaling to 0-255
+            arr_min = arr.min()
+            arr_max = arr.max()
+            if arr_max > arr_min:
+                arr_normalized = ((arr.astype(np.float32) - arr_min) / (arr_max - arr_min) * 255).astype(np.uint8)
+            else:
+                arr_normalized = np.zeros_like(arr, dtype=np.uint8)
+            arr_copy = np.ascontiguousarray(arr_normalized, dtype=np.uint8)
+        else:
+            # For other dtypes, try to convert directly
+            arr_copy = np.ascontiguousarray(arr.astype(np.uint8), dtype=np.uint8)
         
         # Convert to QImage format (RGB888)
         # QImage constructor takes data pointer, so we need to ensure data stays alive
@@ -1614,6 +1723,7 @@ class PreprocessWizard(QWidget):
                 saturation_threshold=self.sat_spin.value(),
                 remove_bed=False,  # Removed - use object selection instead
                 remove_non_grayscale=apply_non_grayscale,
+                remove_overlays=self.remove_overlays_cb.isChecked(),  # Use checkbox value
                 object_mask=combined_mask if apply_mask_in_preview else None,
                 object_mask_slice_index=0 if apply_mask_in_preview else None,
                 non_grayscale_slice_ranges=[(0, 0)] if apply_non_grayscale else None,  # Single slice for preview
@@ -2076,7 +2186,21 @@ class PreprocessWizard(QWidget):
     
     def show_auto_detect_settings(self) -> None:
         """Show settings dialog for auto-detection parameters."""
-        dialog = AutoDetectSettingsDialog(self, self.auto_detect_params)
+        # Update max intensity in params based on detected dtype
+        max_intensity = 255  # Default
+        if self.image_paths:
+            try:
+                first_image = images.load_image_rgb(self.image_paths[0], rotation=0)
+                if first_image.dtype == np.uint16 or images._is_dicom_file(self.image_paths[0]):
+                    max_intensity = 65535
+            except Exception:
+                pass
+        
+        # Update dialog params with max intensity
+        dialog_params = self.auto_detect_params.copy()
+        dialog_params['max_intensity'] = max_intensity
+        
+        dialog = AutoDetectSettingsDialog(self, dialog_params)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.auto_detect_params.update(dialog.get_params())
     
@@ -2101,6 +2225,52 @@ class PreprocessWizard(QWidget):
             self.black_threshold_min_spin.setValue(max_val)
             self.black_threshold_min_spin.blockSignals(False)
         self._on_black_threshold_changed()
+    
+    def _update_intensity_ranges_for_dtype(self) -> None:
+        """Update intensity spinbox ranges based on detected image dtype (uint8 vs uint16)."""
+        if not self.image_paths:
+            return
+        
+        # Load first image to detect dtype
+        try:
+            first_image = images.load_image_rgb(self.image_paths[0], rotation=0)
+            max_intensity = 255  # Default for uint8
+            
+            # Check if it's DICOM (uint16) by checking dtype or file extension
+            if first_image.dtype == np.uint16 or images._is_dicom_file(self.image_paths[0]):
+                max_intensity = 65535
+            elif first_image.dtype == np.int16:
+                # int16 can be -32768 to 32767, but we'll use 0-65535 range for UI
+                max_intensity = 65535
+            
+            # Update black threshold spinboxes
+            current_min = self.black_threshold_min_spin.value()
+            current_max = self.black_threshold_max_spin.value()
+            
+            # Scale current values proportionally if switching from uint8 to uint16
+            if max_intensity == 65535 and self.black_threshold_max_spin.maximum() == 255:
+                # Scale from uint8 to uint16
+                scale_factor = 65535.0 / 255.0
+                current_min = int(round(current_min * scale_factor))
+                current_max = int(round(current_max * scale_factor))
+            elif max_intensity == 255 and self.black_threshold_max_spin.maximum() == 65535:
+                # Scale from uint16 to uint8
+                scale_factor = 255.0 / 65535.0
+                current_min = int(round(current_min * scale_factor))
+                current_max = int(round(current_max * scale_factor))
+            
+            # Clamp to valid range
+            current_min = max(0, min(current_min, max_intensity))
+            current_max = max(0, min(current_max, max_intensity))
+            
+            self.black_threshold_min_spin.setRange(0, max_intensity)
+            self.black_threshold_max_spin.setRange(0, max_intensity)
+            self.black_threshold_min_spin.setValue(current_min)
+            self.black_threshold_max_spin.setValue(max(current_min, current_max))
+            
+        except Exception:
+            # If loading fails, keep defaults
+            pass
     
     def _on_black_threshold_changed(self) -> None:
         """Handle black threshold value change - update preview if visualizing."""
@@ -2132,3 +2302,332 @@ class PreprocessWizard(QWidget):
         
         # Refresh preview to show rotated "after" image
         self.update_preview()
+    
+    def reorder_slices_by_z_position(self) -> None:
+        """
+        Reorder slices based on their Z position from DICOM metadata.
+        For non-DICOM files, uses filename sorting.
+        """
+        if not self.image_paths:
+            QMessageBox.warning(
+                self,
+                "No Images",
+                "Please load images first."
+            )
+            return
+        
+        # Show progress dialog
+        progress = QProgressDialog(
+            "Reading Z positions from DICOM files...\n"
+            "For large DICOM files (high resolution, 16-bit), this reads metadata only (efficient).",
+            None,
+            0, len(self.image_paths),
+            self
+        )
+        progress.setWindowTitle("Reordering Slices")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        try:
+            # Store original order if not already stored
+            if self.original_image_paths is None:
+                self.original_image_paths = self.image_paths.copy()
+            
+            # Extract Z positions for each slice
+            # get_dicom_z_position uses stop_before_pixels=True, so it's efficient
+            # even for large DICOM files with high resolution and 16-bit intensity range
+            slice_data = []
+            dicom_count = 0
+            
+            for idx, path in enumerate(self.image_paths):
+                progress.setValue(idx)
+                QApplication.processEvents()
+                
+                # This reads metadata only (stop_before_pixels=True), efficient for large files
+                z_pos = images.get_dicom_z_position(path)
+                if z_pos is not None:
+                    dicom_count += 1
+                    slice_data.append((z_pos, idx, path))
+                else:
+                    # For non-DICOM files, use filename for sorting
+                    slice_data.append((float('inf'), idx, path))  # Put non-DICOM at end
+            
+            # Sort by Z position (ascending)
+            slice_data.sort(key=lambda x: x[0])
+            
+            # Reorder image_paths
+            self.image_paths = [item[2] for item in slice_data]
+            
+            # Update current image index to maintain the same visual slice
+            if self.current_image_index < len(self.image_paths):
+                # Find the new index of the current image
+                current_path = self.original_image_paths[self.current_image_index]
+                try:
+                    new_index = self.image_paths.index(current_path)
+                    self.current_image_index = new_index
+                except ValueError:
+                    # If current path not found, keep same index (clamped)
+                    self.current_image_index = min(self.current_image_index, len(self.image_paths) - 1)
+            
+            # Update UI
+            num_images = len(self.image_paths)
+            self.image_selector.setRange(1, num_images)
+            self.image_count_label.setText(f"of {num_images}")
+            self.slice_slider.setRange(1, num_images)
+            self.image_selector.blockSignals(True)
+            self.image_selector.setValue(self.current_image_index + 1)
+            self.image_selector.blockSignals(False)
+            self.slice_slider.blockSignals(True)
+            self.slice_slider.setValue(self.current_image_index + 1)
+            self.slice_slider.blockSignals(False)
+            
+            # Mark as reordered
+            self.slice_reordered = True
+            
+            progress.close()
+            
+            # Show success message
+            if dicom_count > 0:
+                QMessageBox.information(
+                    self,
+                    "Slices Reordered",
+                    f"Successfully reordered {dicom_count} DICOM slices by Z position.\n\n"
+                    f"Total slices: {num_images}\n"
+                    f"Slices will be processed in anatomical order during preprocessing."
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Slices Sorted",
+                    f"No DICOM files found. Slices sorted alphabetically by filename.\n\n"
+                    f"Total slices: {num_images}"
+                )
+            
+            # Update preview to show current slice
+            self.update_preview()
+            
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(
+                self,
+                "Reordering Error",
+                f"Error while reordering slices:\n\n{str(e)}"
+            )
+    
+    def reorder_files_in_source_folder(self) -> None:
+        """
+        Physically rename files in the source folder to match Z order.
+        For DICOM files, also updates InstanceNumber metadata to match sequential order.
+        Shows a warning dialog before proceeding.
+        """
+        if not self.image_paths or self.input_dir is None:
+            QMessageBox.warning(
+                self,
+                "No Images",
+                "Please load images first."
+            )
+            return
+        
+        # Show warning dialog
+        reply = QMessageBox.warning(
+            self,
+            "⚠️ Warning: Modifying Source Files",
+            "You are about to rename files in the source folder.\n\n"
+            "This will modify the original filenames based on Z position.\n"
+            "For DICOM files, InstanceNumber metadata will also be updated.\n\n"
+            "Note: Large DICOM files (high resolution, 16-bit intensity) may take longer to process.\n\n"
+            "This action cannot be easily undone.\n\n"
+            "Do you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Show progress dialog
+        progress = QProgressDialog(
+            "Reading Z positions and renaming files...\n"
+            "For large DICOM files, this may take longer due to high resolution and intensity range.",
+            None,
+            0, len(self.image_paths) * 2,  # Account for two passes: reading + renaming
+            self
+        )
+        progress.setWindowTitle("Renaming Files")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+        try:
+            # Extract Z positions for each slice (metadata only - efficient for large DICOM files)
+            slice_data = []
+            dicom_count = 0
+            
+            for idx, path in enumerate(self.image_paths):
+                progress.setValue(idx)
+                QApplication.processEvents()
+                
+                # Use get_dicom_z_position which reads metadata only (stop_before_pixels=True)
+                # This is efficient even for large DICOM files with high resolution
+                z_pos = images.get_dicom_z_position(path)
+                # Check if it's a DICOM file
+                is_dicom = path.suffix.lower() in [".dcm", ".dicom"]
+                
+                if z_pos is not None:
+                    dicom_count += 1
+                    slice_data.append((z_pos, idx, path, is_dicom))
+                else:
+                    # For non-DICOM files, use filename for sorting
+                    slice_data.append((float('inf'), idx, path, is_dicom))  # Put non-DICOM at end
+            
+            # Sort by Z position (ascending)
+            slice_data.sort(key=lambda x: x[0])
+            
+            # Generate new filenames based on Z order
+            # Use a temporary naming scheme to avoid conflicts
+            temp_names = []
+            for idx, (z_pos, orig_idx, path, is_dicom) in enumerate(slice_data):
+                ext = path.suffix
+                # Create temporary name with high number to avoid conflicts
+                temp_name = path.parent / f"__temp_reorder_{999999 - idx:06d}{ext}"
+                temp_names.append((path, temp_name, is_dicom))
+            
+            # First pass: rename all files to temporary names
+            # File rename operations are efficient regardless of file size (OS-level operation)
+            # Progress: 0 to len(image_paths) for reading, len(image_paths) to 2*len for renaming
+            rename_start_idx = len(self.image_paths)
+            for rename_idx, (orig_path, temp_path, is_dicom) in enumerate(temp_names):
+                progress.setValue(rename_start_idx + rename_idx)
+                QApplication.processEvents()
+                
+                if orig_path.exists():
+                    # Path.rename() is efficient for large files - it's an OS-level operation
+                    # that doesn't load file contents into memory, regardless of file size
+                    # Works efficiently even for large DICOM files (high resolution, 16-bit intensity)
+                    orig_path.rename(temp_path)
+            
+            # Second pass: rename from temporary names to final sequential names
+            # Determine the base name pattern from original files
+            base_name = "slice"
+            if len(self.image_paths) > 0:
+                # Try to extract a common prefix from original filenames
+                first_name = self.image_paths[0].stem
+                # Remove common numeric suffixes
+                match = re.match(r'(.+?)(\d+)$', first_name)
+                if match:
+                    base_name = match.group(1).rstrip('_-')
+            
+            # Calculate number of digits needed
+            num_digits = len(str(len(slice_data)))
+            
+            renamed_files = []
+            dicom_updated = 0
+            # Progress continues from where first pass left off
+            # Total progress range: 0 to 2*len(image_paths)
+            # Phase 1 (reading): 0 to len(image_paths)
+            # Phase 2 (renaming + metadata): len(image_paths) to 2*len(image_paths)
+            
+            for idx, (z_pos, orig_idx, orig_path, is_dicom) in enumerate(slice_data):
+                # Progress: len(image_paths) + idx (second half of progress bar)
+                progress.setValue(rename_start_idx + len(temp_names) + idx)
+                QApplication.processEvents()
+                
+                temp_path = temp_names[idx][1]
+                ext = orig_path.suffix
+                new_name = f"{base_name}_{idx:0{num_digits}d}{ext}"
+                new_path = orig_path.parent / new_name
+                
+                # For DICOM files, update metadata before renaming
+                # Note: Large DICOM files (high resolution, uint16/int16) may take longer
+                if is_dicom:
+                    try:
+                        # Check if pydicom is available
+                        try:
+                            import pydicom
+                        except ImportError:
+                            # pydicom not available, skip metadata update
+                            pass
+                        else:
+                            # For large DICOM files, we need to load the full file to update metadata
+                            # This is necessary to preserve pixel data when saving
+                            # pydicom handles large files (high resolution, 16-bit intensity) efficiently
+                            # by using memory-mapped files and optimized I/O
+                            
+                            # Read DICOM file (may be large for high-resolution images with 16-bit intensity)
+                            # For very large files, pydicom automatically optimizes memory usage
+                            # Note: High-resolution DICOM files (e.g., 2048x2048, 4096x4096) with
+                            # 16-bit intensity (uint16/int16) can be 8-32 MB per file
+                            ds = pydicom.dcmread(str(temp_path))
+                            
+                            # Update InstanceNumber to match sequential order (1-based for DICOM)
+                            # InstanceNumber can be string or int, we'll use string for compatibility
+                            ds.InstanceNumber = str(idx + 1)
+                            
+                            # Save updated DICOM file with write_like_original to preserve format
+                            # This preserves the original encoding and handles large files efficiently
+                            ds.save_as(str(temp_path), write_like_original=True)
+                            dicom_updated += 1
+                    except Exception as e:
+                        # If DICOM update fails, continue with rename anyway
+                        # Log warning but don't fail the entire operation
+                        import warnings
+                        warnings.warn(f"Could not update DICOM metadata for {temp_path.name}: {e}")
+                
+                # Rename from temp to final name
+                # This is efficient regardless of file size (OS-level operation)
+                if temp_path.exists():
+                    temp_path.rename(new_path)
+                    renamed_files.append((orig_path.name, new_name))
+            
+            progress.setValue(len(self.image_paths) * 2)  # Mark as complete
+            progress.close()
+            
+            # Reload image paths to reflect new names
+            self.load_image_paths()
+            
+            # Mark as reordered
+            self.slice_reordered = True
+            
+            # Show success message
+            if dicom_count > 0:
+                msg = f"Successfully renamed {dicom_count} DICOM files by Z position."
+                if dicom_updated > 0:
+                    msg += f"\nUpdated InstanceNumber metadata for {dicom_updated} DICOM files."
+                msg += f"\n\nTotal files renamed: {len(renamed_files)}\n"
+                if len(slice_data) > 0:
+                    sample_ext = slice_data[0][2].suffix
+                    msg += f"Files are now named sequentially: {base_name}_000{sample_ext}, {base_name}_001{sample_ext}, etc."
+                else:
+                    msg += f"Files are now named sequentially: {base_name}_000.ext, {base_name}_001.ext, etc."
+                
+                QMessageBox.information(
+                    self,
+                    "Files Renamed",
+                    msg
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Files Sorted",
+                    f"No DICOM files found. Files sorted alphabetically.\n\n"
+                    f"Total files renamed: {len(renamed_files)}"
+                )
+            
+            # Update preview
+            self.update_preview()
+            
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(
+                self,
+                "Renaming Error",
+                f"Error while renaming files:\n\n{str(e)}\n\n"
+                "Some files may have been renamed. Please check the source folder."
+            )

@@ -13,7 +13,7 @@ The project is designed to be:
 ## Features
 
 ### Preprocessing
-- Load raw CT slice images (PNG, JPG, TIFF, etc.)
+- Load raw CT slice images (PNG, JPG, TIFF, DICOM, etc.)
 - **Interactive object selection tools:**
   - Box selection
   - Lasso selection
@@ -30,7 +30,7 @@ The project is designed to be:
   - Preview transformations before processing
   - Applied to entire volume during preprocessing
 - **Black Threshold (Background Removal):**
-  - Min/max intensity range selection
+  - Min/max intensity range selection (automatically adapts for DICOM uint16 vs standard uint8)
   - Visualize pixels within threshold range
   - Add threshold selection to removal list
   - Removes pixels from all slices or specified slice ranges
@@ -43,16 +43,28 @@ The project is designed to be:
   - Editable slice ranges (min/max) for each modification
   - Clear indication of modification type (Crop, Selection removal, etc.)
   - All modifications applied during preprocessing
+- **Slice Reordering:**
+  - Automatic reordering by Z position (DICOM metadata)
+  - Reorder files in source folder with sequential naming
+  - Optional export prefix for sequential filenames
 - **Export Range Selection:**
   - Export all slices (default)
   - Export specific slice range
   - Min/max slice selection controls
+- **DICOM Support:**
+  - Full DICOM file compatibility (.dcm, .dicom)
+  - Preserves 16-bit intensity range (0-65535) vs standard 8-bit (0-255)
+  - Automatic intensity range adaptation for all controls
+  - DICOM metadata preservation during export
 - **Batch processing with detailed progress:**
   - Phase-aware progress (Loading, Processing, Saving)
   - Per-phase slice counters
   - Elapsed time and time remaining
   - Cancellable operations
 - Output clean, processed slices ready for meshing
+
+![Preprocessing Example](./images/preprocessing_example.png)
+*Preprocessing interface showing automatic bed detection (red bounding box) and before/after comparison*
 
 ### Meshing
 - Load processed slices into a 3D volume
@@ -66,21 +78,27 @@ The project is designed to be:
     - Color represents pixel count (log scale for visualization)
     - Vertical bin boundary lines aligned with intensity axis
 - **Interactive bin management:**
-  - Add/delete bins
+  - **Automatic optimal bin detection:** Analyzes intensity distribution to determine optimal bin count and ranges
+  - Add/delete bins (per-row delete buttons)
   - Modify bin min/max values (integer intensity values, minimum 1)
   - Draggable bin boundaries on histogram with real-time updates
   - Continuous bins mode (automatically adjusts adjacent bins) - enabled by default
   - Bin colors with preview
   - Enable/disable individual bins
   - Bin limits always start at intensity 1 minimum (0 is background/air)
+  - Intensity ranges automatically adapt for DICOM (uint16) vs standard images (uint8)
 - **Slice preview:**
   - Large preview with slice navigation
   - Slice selector spinbox and slider for quick navigation
   - Pixels colored according to assigned bins
   - Real-time updates when bin parameters change
-- Automatic intensity bin definition (6 bins by default)
+- Automatic optimal bin detection from intensity distribution (3-12 bins based on data)
+- Fallback to 6 uniform bins if auto-detection unavailable
 - Per-bin 3D mesh generation
 - Supports multiple output meshes per dataset
+
+![Meshing Example](./images/meshing_example.png)
+*Meshing interface showing intensity histogram analysis and slice preview with bin-colored pixels*
 
 ### Export
 - **Format support:**
@@ -106,7 +124,7 @@ The project is designed to be:
   - **Gaussian Smoothing:** Smooth mesh surfaces (optional)
     - Configurable smoothing strength (sigma)
     - Creates smoother surfaces but may lose small details
-  - **Spacing:** Voxel spacing in mm (X, Y, Z)
+  - **Spacing:** Voxel spacing in mm (Z, Y, X) - configurable per axis
 - **File Size Estimation:**
   - Calculate approximate file size before export
   - Shows total size in MB for all files
@@ -244,13 +262,14 @@ Processed slices are written to the selected output directory. The output direct
      - Intensity on horizontal axis, Slice Number on vertical axis
      - Vertical bin boundary lines aligned with intensity
 4. **Manage intensity bins:**
-   - Default 6 bins are created automatically (starting at intensity 1 minimum)
-   - Add/delete bins as needed
+   - Optimal bins are automatically detected from intensity distribution (3-12 bins)
+   - Add/delete bins as needed (use delete button in each row)
    - Adjust bin min/max values (integers, minimum 1)
    - Drag bin boundaries on the histogram for quick adjustment
    - "Continuous bins" is enabled by default - automatically adjusts adjacent bins
    - Assign colors to bins (double-click color cell)
    - Enable/disable bins using checkboxes
+   - Intensity ranges automatically adapt for DICOM (uint16) vs standard images (uint8)
 5. **Preview slices:**
    - Navigate through slices using the slice selector or slider
    - Preview shows pixels colored according to their assigned bins
@@ -309,6 +328,9 @@ Each enabled bin produces a separate mesh file (or all bins combined into one fi
   - Integer intensity values in filenames
   - Component filtering applied (if enabled)
   - Gaussian smoothing applied (if enabled)
+
+![3D Render Example](./images/blender_3D_redner_example.png)
+*Example 3D mesh rendered in Blender with color-coded intensity values*
 
 ---
 

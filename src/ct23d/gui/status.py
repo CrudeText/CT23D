@@ -270,10 +270,22 @@ class StatusController(QObject):
         def on_finished(result: object) -> None:
             # Only process result if not cancelled
             if not worker.isInterruptionRequested():
-                dialog.hide()
-                cleanup_worker()
+                # Don't hide dialog yet - let on_success callback complete first
+                # Update dialog to show we're finalizing
+                dialog.setLabelText("Finalizing...\n\nSetting up preview and graphs...")
+                dialog.setValue(dialog.maximum())
+                QApplication.processEvents()
+                
+                # Call on_success callback while dialog is still visible
                 if on_success is not None:
-                    on_success(result)
+                    try:
+                        on_success(result)
+                    finally:
+                        # Hide dialog after on_success completes
+                        dialog.hide()
+                else:
+                    dialog.hide()
+                cleanup_worker()
             else:
                 # Was cancelled, just clean up silently
                 dialog.hide()

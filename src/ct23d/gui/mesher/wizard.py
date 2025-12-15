@@ -92,24 +92,23 @@ class MesherWizard(QWidget):
         bin_group = QGroupBox("Intensity Bins")
         bin_layout = QVBoxLayout(bin_group)
         
-        # Add/Delete buttons
+        # Add button
         bin_buttons = QHBoxLayout()
         self.btn_add_bin = QPushButton("Add Bin")
         self.btn_add_bin.clicked.connect(self._on_add_bin)
-        self.btn_delete_bin = QPushButton("Delete Selected")
-        self.btn_delete_bin.clicked.connect(self._on_delete_bin)
         bin_buttons.addWidget(self.btn_add_bin)
-        bin_buttons.addWidget(self.btn_delete_bin)
+        bin_buttons.addStretch()
         bin_layout.addLayout(bin_buttons)
         
-        self.bins_table = QTableWidget(0, 5, self)
-        self.bins_table.setHorizontalHeaderLabels(["Enabled", "Low", "High", "Name", "Color"])
+        self.bins_table = QTableWidget(0, 6, self)
+        self.bins_table.setHorizontalHeaderLabels(["Enabled", "Low", "High", "Name", "Color", "Delete"])
         self.bins_table.setEditTriggers(QAbstractItemView.AllEditTriggers)
         self.bins_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.bins_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.bins_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.bins_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.bins_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.bins_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.bins_table.cellChanged.connect(self._on_bin_table_changed)
         self.bins_table.cellDoubleClicked.connect(self._on_bin_table_double_clicked)
         # Also connect itemChanged for checkbox changes
@@ -158,6 +157,38 @@ class MesherWizard(QWidget):
         # Mesh processing options group (left side)
         processing_group = QGroupBox("Mesh Processing Options")
         processing_layout = QVBoxLayout(processing_group)
+        
+        # Spacing (voxel size in mm)
+        spacing_row = QHBoxLayout()
+        spacing_row.addWidget(QLabel("Voxel spacing (mm):"))
+        spacing_row.addWidget(QLabel("Z:"))
+        self.spin_spacing_z = QDoubleSpinBox()
+        self.spin_spacing_z.setRange(0.01, 100.0)
+        self.spin_spacing_z.setDecimals(2)
+        self.spin_spacing_z.setSingleStep(0.1)
+        self.spin_spacing_z.setValue(1.6)
+        self.spin_spacing_z.setToolTip("Slice thickness in millimeters (Z direction)")
+        spacing_row.addWidget(self.spin_spacing_z)
+        
+        spacing_row.addWidget(QLabel("Y:"))
+        self.spin_spacing_y = QDoubleSpinBox()
+        self.spin_spacing_y.setRange(0.01, 100.0)
+        self.spin_spacing_y.setDecimals(2)
+        self.spin_spacing_y.setSingleStep(0.1)
+        self.spin_spacing_y.setValue(1.0)
+        self.spin_spacing_y.setToolTip("Pixel size in Y direction (millimeters)")
+        spacing_row.addWidget(self.spin_spacing_y)
+        
+        spacing_row.addWidget(QLabel("X:"))
+        self.spin_spacing_x = QDoubleSpinBox()
+        self.spin_spacing_x.setRange(0.01, 100.0)
+        self.spin_spacing_x.setDecimals(2)
+        self.spin_spacing_x.setSingleStep(0.1)
+        self.spin_spacing_x.setValue(1.0)
+        self.spin_spacing_x.setToolTip("Pixel size in X direction (millimeters)")
+        spacing_row.addWidget(self.spin_spacing_x)
+        spacing_row.addStretch()
+        processing_layout.addLayout(spacing_row)
         
         # Component filtering option
         component_row = QHBoxLayout()
@@ -699,6 +730,78 @@ class MesherWizard(QWidget):
             )
         return bins
 
+    def _populate_optimal_bins(self, optimal_bins: List[IntensityBin], vmin: float, vmax: float) -> None:
+        """Populate bins table with optimal bins detected from intensity distribution."""
+        n_bins = len(optimal_bins)
+        if n_bins == 0:
+            # Fallback to default if no bins detected
+            self._populate_default_bins(vmin, vmax)
+            return
+        
+        # Round to integers for bin edges
+        vmin_int = int(round(vmin))
+        vmax_int = int(round(vmax))
+        # Ensure minimum is at least 1 (0 is background/air)
+        if vmin_int < 1:
+            vmin_int = 1
+        self.bins_table.setRowCount(n_bins)
+        
+        # Clear spinbox lists
+        self._bin_low_spinboxes.clear()
+        self._bin_high_spinboxes.clear()
+
+        # Generate colors for bins
+        import colorsys
+        for i, bin in enumerate(optimal_bins):
+            enabled_item = QTableWidgetItem()
+            enabled_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            enabled_item.setCheckState(Qt.Checked)
+
+            # Create spinboxes for Low and High (integers)
+            # Use detected range for spinbox limits
+            min_val = max(1, vmin_int)
+            max_val = vmax_int
+            low_spin = QSpinBox()
+            low_spin.setRange(min_val, max_val)
+            low_spin.setValue(bin.low)
+            low_spin.setSingleStep(1)
+            low_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'low', val))
+            self._bin_low_spinboxes.append(low_spin)
+            
+            high_spin = QSpinBox()
+            high_spin.setRange(min_val, max_val)
+            high_spin.setValue(bin.high)
+            high_spin.setSingleStep(1)
+            high_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'high', val))
+            self._bin_high_spinboxes.append(high_spin)
+            
+            name_item = QTableWidgetItem(bin.name if bin.name else f"bin_{i + 1}")
+            
+            # Color item with unique color
+            hue = (i / max(n_bins, 1)) * 0.8
+            saturation = 0.8
+            value = 0.9
+            rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+            color = QColor(int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255))
+            color_item = QTableWidgetItem("")
+            color_item.setBackground(color)
+            color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)  # Not editable text
+            color_item.setToolTip("Double-click to change color")
+            
+            # Delete button
+            delete_btn = QPushButton("Delete")
+            delete_btn.setToolTip("Delete this bin")
+            delete_btn.clicked.connect(lambda checked, row=i: self._on_delete_bin_row(row))
+
+            self.bins_table.setItem(i, 0, enabled_item)
+            self.bins_table.setCellWidget(i, 1, low_spin)
+            self.bins_table.setCellWidget(i, 2, high_spin)
+            self.bins_table.setItem(i, 3, name_item)
+            self.bins_table.setItem(i, 4, color_item)
+            self.bins_table.setCellWidget(i, 5, delete_btn)
+        
+        self._update_bin_visualization()
+    
     def _populate_default_bins(self, vmin: float, vmax: float) -> None:
         """Create evenly spaced bins with default number (6 bins)."""
         n_bins = 6  # Default number of bins
@@ -752,12 +855,18 @@ class MesherWizard(QWidget):
             color_item.setBackground(color)
             color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)  # Not editable text
             color_item.setToolTip("Double-click to change color")
+            
+            # Delete button
+            delete_btn = QPushButton("Delete")
+            delete_btn.setToolTip("Delete this bin")
+            delete_btn.clicked.connect(lambda checked, row=i: self._on_delete_bin_row(row))
 
             self.bins_table.setItem(i, 0, enabled_item)
             self.bins_table.setCellWidget(i, 1, low_spin)
             self.bins_table.setCellWidget(i, 2, high_spin)
             self.bins_table.setItem(i, 3, name_item)
             self.bins_table.setItem(i, 4, color_item)
+            self.bins_table.setCellWidget(i, 5, delete_btn)
         
         self._update_bin_visualization()
     
@@ -862,7 +971,12 @@ class MesherWizard(QWidget):
                     # Phase 2: Computing intensity range
                     self.phase_progress.emit("Computing intensity range", 0, 1, total_slices + 2)
                     QApplication.processEvents()
-                    grayscale = volume.mean(axis=-1)
+                    # Use max intensity across channels (same as meshing) to preserve
+                    # information from colored overlays in medical imaging
+                    if volume.ndim == 4 and volume.shape[-1] == 3:
+                        grayscale = volume.max(axis=-1)
+                    else:
+                        grayscale = volume
                     intensities = grayscale.ravel()
                     non_zero = intensities[intensities > 0]
                     if non_zero.size > 0:
@@ -889,7 +1003,7 @@ class MesherWizard(QWidget):
         worker = VolumeLoadWorker()
         
         def on_success(result: object) -> None:
-            from PySide6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication, QProgressDialog
             
             volume, hist_values, vmin, vmax = result  # type: ignore[misc]
             self._volume = volume
@@ -898,9 +1012,23 @@ class MesherWizard(QWidget):
             # Process events before starting
             QApplication.processEvents()
             
-            # Populate default bins and update preview (fast operations)
+            # Auto-detect optimal bins from intensity distribution
             try:
-                self._populate_default_bins(vmin, vmax)
+                # Use histogram values for optimal bin detection
+                from ct23d.core import bins as binsmod
+                optimal_bins = binsmod.generate_optimal_bins(hist_values, min_bins=3, max_bins=12)
+                
+                # Extract detected range from optimal bins
+                if optimal_bins:
+                    detected_min = min(b.low for b in optimal_bins)
+                    detected_max = max(b.high for b in optimal_bins)
+                    # Use detected range if it's reasonable, otherwise use full range
+                    if detected_min < detected_max:
+                        vmin = float(detected_min)
+                        vmax = float(detected_max)
+                
+                # Populate bins with auto-detected values
+                self._populate_optimal_bins(optimal_bins, vmin, vmax)
                 QApplication.processEvents()
                 
                 bins = self._collect_bins_from_table()
@@ -908,6 +1036,9 @@ class MesherWizard(QWidget):
                 # Update preview immediately
                 self.slice_preview.set_volume(volume)
                 self.slice_preview.set_bins(bins)
+                # Force a complete update of the preview widget
+                QApplication.processEvents()
+                # Give preview time to render
                 QApplication.processEvents()
             except Exception as e:
                 print(f"Error setting up bins and preview: {e}")
@@ -917,6 +1048,9 @@ class MesherWizard(QWidget):
             # Update histogram (already computed in worker, but need to set it)
             try:
                 self.histogram.set_histogram_3d(volume, n_bins=256, value_range=(vmin, vmax))
+                # Force histogram to render
+                QApplication.processEvents()
+                # Give histogram time to render
                 QApplication.processEvents()
             except Exception as e:
                 print(f"Error setting histogram: {e}")
@@ -927,6 +1061,9 @@ class MesherWizard(QWidget):
             try:
                 bins = self._collect_bins_from_table()
                 self.histogram.update_bins(bins)
+                # Force final update
+                QApplication.processEvents()
+                # Give histogram time to update with bin boundaries
                 QApplication.processEvents()
             except Exception as e:
                 print(f"Error updating bins on histogram: {e}")
@@ -936,6 +1073,9 @@ class MesherWizard(QWidget):
             # File size calculation is now manual only (button click)
             
             self.btn_export_meshes.setEnabled(True)
+            
+            # Final process events to ensure everything is rendered
+            QApplication.processEvents()
 
         # Run volume loading with progress (single dialog)
         self.status.run_threaded_with_progress(
@@ -1180,33 +1320,47 @@ class MesherWizard(QWidget):
         color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)
         color_item.setToolTip("Double-click to change color")
         
+        # Delete button
+        delete_btn = QPushButton("Delete")
+        delete_btn.setToolTip("Delete this bin")
+        delete_btn.clicked.connect(lambda checked, r=row: self._on_delete_bin_row(r))
+        
         self.bins_table.setItem(row, 0, enabled_item)
         self.bins_table.setCellWidget(row, 1, low_spin)
         self.bins_table.setCellWidget(row, 2, high_spin)
         self.bins_table.setItem(row, 3, name_item)
         self.bins_table.setItem(row, 4, color_item)
+        self.bins_table.setCellWidget(row, 5, delete_btn)
         
         self._update_bin_visualization()
     
-    def _on_delete_bin(self) -> None:
-        """Delete the selected bin(s)."""
-        selected_rows = set()
-        for item in self.bins_table.selectedItems():
-            selected_rows.add(item.row())
+    def _on_delete_bin_row(self, row: int) -> None:
+        """Delete a specific bin row."""
+        if row < 0 or row >= self.bins_table.rowCount():
+            return
         
-        if not selected_rows:
-            # If no selection, delete the last row
-            if self.bins_table.rowCount() > 0:
-                selected_rows = {self.bins_table.rowCount() - 1}
+        # Remove from spinbox lists
+        if row < len(self._bin_low_spinboxes):
+            self._bin_low_spinboxes.pop(row)
+        if row < len(self._bin_high_spinboxes):
+            self._bin_high_spinboxes.pop(row)
         
-        # Delete rows in reverse order to maintain indices
-        for row in sorted(selected_rows, reverse=True):
-            self.bins_table.removeRow(row)
-            # Remove from spinbox lists
-            if row < len(self._bin_low_spinboxes):
-                self._bin_low_spinboxes.pop(row)
-            if row < len(self._bin_high_spinboxes):
-                self._bin_high_spinboxes.pop(row)
+        # Remove the row from the table
+        self.bins_table.removeRow(row)
+        
+        # Reconnect delete buttons for all remaining rows to ensure correct row indices
+        # (since row indices shift after deletion)
+        for r in range(self.bins_table.rowCount()):
+            delete_btn = self.bins_table.cellWidget(r, 5)
+            if delete_btn is not None:
+                # Disconnect all existing connections
+                try:
+                    delete_btn.clicked.disconnect()
+                except TypeError:
+                    # No connections to disconnect
+                    pass
+                # Reconnect with correct row index (using default argument to capture r)
+                delete_btn.clicked.connect(lambda checked, row_idx=r: self._on_delete_bin_row(row_idx))
         
         self._update_bin_visualization()
     

@@ -28,8 +28,8 @@ def load_volume_from_dir(
     Returns
     -------
     np.ndarray
-        Volume with shape [Z, Y, X, 3] (if as_rgb=True) or [Z, Y, X] (if False),
-        dtype=uint8.
+        Volume with shape [Z, Y, X, 3] (if as_rgb=True) or [Z, Y, X] (if False).
+        dtype=uint8 for standard image formats, dtype=uint16 for DICOM files.
 
     Raises
     ------
@@ -57,23 +57,26 @@ def to_grayscale(volume: np.ndarray) -> np.ndarray:
     ----------
     volume:
         Either:
-          - 4D array: [Z, Y, X, 3] (RGB, uint8), or
+          - 4D array: [Z, Y, X, 3] (RGB, uint8 or uint16), or
           - 3D array: [Z, Y, X] (already grayscale).
 
     Returns
     -------
     np.ndarray
-        3D array [Z, Y, X], dtype=uint8.
+        3D array [Z, Y, X], dtype matches input (uint8 or uint16).
+        For uint16 input, preserves full intensity range (0-65535).
+        For uint8 input, preserves standard range (0-255).
 
     Notes
     -----
     For RGB input, this uses a standard luminance conversion:
         Y = 0.299 R + 0.587 G + 0.114 B
-    and clamps to 0–255.
+    For uint8 input, clamps to 0–255.
+    For uint16 input, preserves full range (0-65535).
     """
     if volume.ndim == 3:
-        # Already grayscale [Z, Y, X]
-        return volume.astype(np.uint8)
+        # Already grayscale [Z, Y, X] - preserve dtype
+        return volume.copy()
 
     if volume.ndim != 4 or volume.shape[-1] != 3:
         raise ValueError(
@@ -81,15 +84,72 @@ def to_grayscale(volume: np.ndarray) -> np.ndarray:
             f"got shape {volume.shape}"
         )
 
+    # Preserve dtype
+    is_uint16 = volume.dtype == np.uint16
+    
     rgb = volume.astype(np.float32)
     r = rgb[..., 0]
     g = rgb[..., 1]
     b = rgb[..., 2]
 
     gray = 0.299 * r + 0.587 * g + 0.114 * b
-    gray = np.clip(gray, 0, 255).astype(np.uint8)
+    
+    if is_uint16:
+        # Preserve full uint16 range (0-65535)
+        gray = np.clip(gray, 0, 65535).astype(np.uint16)
+    else:
+        # Standard uint8 range (0-255)
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
 
     return gray
+
+
+def to_intensity_max(volume: np.ndarray) -> np.ndarray:
+    """
+    Extract intensity from RGB volume using maximum channel value.
+    
+    This is better than luminance conversion for medical imaging with colored
+    overlays, as it preserves the highest intensity value regardless of which
+    color channel it's in. This prevents information loss when colors represent
+    different intensity ranges.
+
+    Parameters
+    ----------
+    volume:
+        Either:
+          - 4D array: [Z, Y, X, 3] (RGB, uint8 or uint16), or
+          - 3D array: [Z, Y, X] (already grayscale).
+
+    Returns
+    -------
+    np.ndarray
+        3D array [Z, Y, X], dtype matches input (uint8 or uint16).
+        For uint16 input, preserves full intensity range (0-65535).
+        For uint8 input, preserves standard range (0-255).
+
+    Notes
+    -----
+    For RGB input, this takes the maximum value across R, G, B channels:
+        I = max(R, G, B)
+    This preserves the highest intensity value, which is important when
+    colors represent different intensity ranges in medical imaging.
+    """
+    if volume.ndim == 3:
+        # Already grayscale [Z, Y, X] - preserve dtype
+        return volume.copy()
+
+    if volume.ndim != 4 or volume.shape[-1] != 3:
+        raise ValueError(
+            f"to_intensity_max expects volume of shape [Z, Y, X, 3] or [Z, Y, X], "
+            f"got shape {volume.shape}"
+        )
+
+    # Take maximum across RGB channels
+    # This preserves the highest intensity value regardless of color channel
+    intensity = np.max(volume, axis=-1)
+    
+    # Preserve dtype (no conversion needed, max preserves dtype)
+    return intensity
 
 
 def normalize_intensity(
