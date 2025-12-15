@@ -352,4 +352,4 @@ Each enabled bin produces a separate mesh file (or all bins combined into one fi
 
 ## License
 
-License to be defined (MIT recommended).
+MIT License.
