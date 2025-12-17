@@ -41,9 +41,26 @@ class AggregatedHistogramView(QFrame):
         self._bin_lines: List[pg.InfiniteLine] = []
         self._bin_labels: List[pg.TextItem] = []
         self.bin_boundary_changed: Optional[Callable[[int, str, float], None]] = None
+        self.range_line_changed: Optional[Callable[[str, float], None]] = None
+        self._range_min_line: Optional[pg.InfiniteLine] = None
+        self._range_max_line: Optional[pg.InfiniteLine] = None
+        self._range_min_label: Optional[pg.TextItem] = None
+        self._range_max_label: Optional[pg.TextItem] = None
     
     def clear(self) -> None:
         """Clear the histogram plot."""
+        if self._range_min_line is not None:
+            self._plot.removeItem(self._range_min_line)
+            self._range_min_line = None
+        if self._range_max_line is not None:
+            self._plot.removeItem(self._range_max_line)
+            self._range_max_line = None
+        if self._range_min_label is not None:
+            self._plot.removeItem(self._range_min_label)
+            self._range_min_label = None
+        if self._range_max_label is not None:
+            self._plot.removeItem(self._range_max_label)
+            self._range_max_label = None
         self._plot.clear()
         self._histogram_data = None
         self._bin_edges = None
@@ -317,6 +334,121 @@ class AggregatedHistogramView(QFrame):
     def set_bin_boundary_callback(self, callback) -> None:
         """Set callback for when bin boundaries are moved."""
         self.bin_boundary_changed = callback
+    
+    def set_range_line_callback(self, callback) -> None:
+        """Set callback for when range lines (min/max) are moved."""
+        self.range_line_changed = callback
+    
+    def update_range_lines(self, min_val: Optional[int], max_val: Optional[int]) -> None:
+        """Update the range lines (min/max) displayed on the histogram."""
+        # Remove existing range lines and labels if any
+        if self._range_min_line is not None:
+            self._plot.removeItem(self._range_min_line)
+            self._range_min_line = None
+        if self._range_max_line is not None:
+            self._plot.removeItem(self._range_max_line)
+            self._range_max_line = None
+        if hasattr(self, '_range_min_label') and self._range_min_label is not None:
+            self._plot.removeItem(self._range_min_label)
+            self._range_min_label = None
+        if hasattr(self, '_range_max_label') and self._range_max_label is not None:
+            self._plot.removeItem(self._range_max_label)
+            self._range_max_label = None
+        
+        # Only create lines if values are provided
+        if min_val is None or max_val is None or self._vmax <= self._vmin:
+            return
+        
+        # Create min range line (vertical, dashed, distinct color)
+        self._range_min_line = pg.InfiniteLine(
+            pos=float(min_val),
+            angle=90,  # Vertical line
+            pen=pg.mkPen(color='cyan', width=2, style=QtCore.Qt.DashLine),
+            movable=True,
+            bounds=[self._vmin, self._vmax]
+        )
+        self._range_min_line.setZValue(20)  # Above bin lines
+        self._range_min_line.line_type = 'min'
+        self._range_min_line.sigPositionChanged.connect(lambda line: self._on_range_line_moved(line))
+        self._plot.addItem(self._range_min_line)
+        
+        # Create min label (positioned above the line, slightly offset)
+        if self._plot.getViewBox() is not None:
+            y_range = self._plot.getViewBox().viewRange()[1]
+            y_max = y_range[1]
+        else:
+            if self._histogram_data is not None and self._histogram_data.size > 0:
+                y_max = float(self._histogram_data.max()) * 1.05
+            else:
+                y_max = 1000.0
+        self._range_min_label = pg.TextItem(
+            text=f"Min: {min_val}",
+            color='cyan',
+            anchor=(0.5, 0),  # Center-aligned, top-anchored (above line)
+            border=pg.mkPen(color='cyan', width=1),
+            fill=pg.mkBrush((0, 0, 0, 200))
+        )
+        self._range_min_label.setPos(float(min_val), y_max * 0.96)  # Lower position
+        self._plot.addItem(self._range_min_label)
+        
+        # Create max range line (vertical, dashed, distinct color)
+        self._range_max_line = pg.InfiniteLine(
+            pos=float(max_val),
+            angle=90,  # Vertical line
+            pen=pg.mkPen(color='magenta', width=2, style=QtCore.Qt.DashLine),
+            movable=True,
+            bounds=[self._vmin, self._vmax]
+        )
+        self._range_max_line.setZValue(20)  # Above bin lines
+        self._range_max_line.line_type = 'max'
+        self._range_max_line.sigPositionChanged.connect(lambda line: self._on_range_line_moved(line))
+        self._plot.addItem(self._range_max_line)
+        
+        # Create max label (positioned above the line, different Y position than min)
+        self._range_max_label = pg.TextItem(
+            text=f"Max: {max_val}",
+            color='magenta',
+            anchor=(0.5, 0),  # Center-aligned, top-anchored (above line)
+            border=pg.mkPen(color='magenta', width=1),
+            fill=pg.mkBrush((0, 0, 0, 200))
+        )
+        self._range_max_label.setPos(float(max_val), y_max * 0.98)  # Higher position
+        self._plot.addItem(self._range_max_label)
+    
+    def _on_range_line_moved(self, line: pg.InfiniteLine) -> None:
+        """Called when a range line is dragged."""
+        new_pos = int(round(line.value()))
+        line_type = getattr(line, 'line_type', None)
+        
+        # Ensure within bounds
+        if new_pos < self._vmin:
+            new_pos = int(round(self._vmin))
+            line.blockSignals(True)
+            line.setValue(float(new_pos))
+            line.blockSignals(False)
+        elif new_pos > self._vmax:
+            new_pos = int(round(self._vmax))
+            line.blockSignals(True)
+            line.setValue(float(new_pos))
+            line.blockSignals(False)
+        
+        # Store current label positions before callback (which might recreate labels)
+        min_label_y = self._range_min_label.pos().y() if self._range_min_label is not None else None
+        max_label_y = self._range_max_label.pos().y() if self._range_max_label is not None else None
+        
+        # Update label position BEFORE callback (to prevent position loss)
+        if line_type == 'min' and self._range_min_label is not None:
+            y_pos = min_label_y if min_label_y is not None else self._range_min_label.pos().y()
+            self._range_min_label.setPos(float(new_pos), y_pos)
+            self._range_min_label.setText(f"Min: {new_pos}")
+        elif line_type == 'max' and self._range_max_label is not None:
+            y_pos = max_label_y if max_label_y is not None else self._range_max_label.pos().y()
+            self._range_max_label.setPos(float(new_pos), y_pos)
+            self._range_max_label.setText(f"Max: {new_pos}")
+        
+        # Call callback to update controls AFTER updating label position
+        if self.range_line_changed is not None and line_type is not None:
+            self.range_line_changed(line_type, float(new_pos))
 
 
 class HistogramTabbedView(QFrame):
@@ -363,6 +495,7 @@ class HistogramTabbedView(QFrame):
         volume: np.ndarray,
         n_bins: int = 256,
         value_range: Optional[tuple[float, float]] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         """
         Set histogram data for all views.
@@ -387,7 +520,7 @@ class HistogramTabbedView(QFrame):
         
         # Update heatmap view (can be slow for large volumes)
         try:
-            self._heatmap_view.set_histogram_3d(volume, n_bins, value_range)
+            self._heatmap_view.set_histogram_3d(volume, n_bins, value_range, progress_callback=progress_callback)
             QApplication.processEvents()
         except Exception as e:
             print(f"Error updating heatmap histogram: {e}")
@@ -411,4 +544,14 @@ class HistogramTabbedView(QFrame):
         self.bin_boundary_changed = callback
         self._aggregated_view.set_bin_boundary_callback(callback)
         self._heatmap_view.set_bin_boundary_callback(callback)
+    
+    def set_range_line_callback(self, callback) -> None:
+        """Set callback for when range lines (min/max) are moved."""
+        self._aggregated_view.set_range_line_callback(callback)
+        self._heatmap_view.set_range_line_callback(callback)
+    
+    def update_range_lines(self, min_val: Optional[int], max_val: Optional[int]) -> None:
+        """Update the range lines (min/max) on both histogram views."""
+        self._aggregated_view.update_range_lines(min_val, max_val)
+        self._heatmap_view.update_range_lines(min_val, max_val)
 

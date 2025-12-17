@@ -707,26 +707,37 @@ class PreprocessWizard(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
 
         # ------------------------------------------------------------------
-        # Input directory selector
+        # Input directory selector (button and label on same line)
         # ------------------------------------------------------------------
         row1 = QHBoxLayout()
-        self.input_label = QLabel("Input directory: (none)")
+        row1.setSpacing(8)  # Small spacing between button and label
         choose_input_btn = QPushButton("Select Input Folder")
+        choose_input_btn.setMaximumWidth(150)  # Smaller button
         choose_input_btn.clicked.connect(self.select_input_dir)
-        row1.addWidget(self.input_label)
         row1.addWidget(choose_input_btn)
+        self.input_label = QLabel("Input directory: (none)")
+        self.input_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row1.addWidget(self.input_label)
+        row1.addStretch()  # Push everything to the left
         layout.addLayout(row1)
 
         # ------------------------------------------------------------------
-        # Processed output directory selector
+        # Processed output directory selector (button and label on same line)
         # ------------------------------------------------------------------
         row2 = QHBoxLayout()
-        self.output_label = QLabel("Processed directory: (auto)")
+        row2.setSpacing(8)  # Small spacing between button and label
         choose_output_btn = QPushButton("Select Output Folder")
+        choose_output_btn.setMaximumWidth(150)  # Smaller button
         choose_output_btn.clicked.connect(self.select_output_dir)
-        row2.addWidget(self.output_label)
         row2.addWidget(choose_output_btn)
+        self.output_label = QLabel("Processed directory: (auto)")
+        self.output_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row2.addWidget(self.output_label)
+        row2.addStretch()  # Push everything to the left
         layout.addLayout(row2)
+
+        # Add spacer to push Image Preview box down, creating space for Patient Info
+        layout.addSpacing(30)  # Space between directory rows and Image Preview box
 
         # Parameters will be moved to the center column between images
 
@@ -736,8 +747,9 @@ class PreprocessWizard(QWidget):
         try:
             preview_group = QGroupBox("Image Preview")
             preview_group.setVisible(True)  # Ensure it's visible
-            preview_group.setMinimumHeight(500)  # Ensure it has minimum height
+            preview_group.setMinimumHeight(450)  # Slightly reduced to allow space for Patient Info
             preview_group_layout = QVBoxLayout(preview_group)
+            preview_group_layout.setContentsMargins(5, 10, 5, 5)  # Normal top margin - box position is controlled by layout spacing
             
             # Image selector with slider
             selector_layout = QHBoxLayout()
@@ -770,10 +782,10 @@ class PreprocessWizard(QWidget):
             before_layout = QVBoxLayout()
             before_layout.addWidget(QLabel("Before preprocessing:"))
             self.before_label = SelectableImageLabel(self)
-            self.before_label.setMinimumSize(400, 400)
+            self.before_label.setMinimumSize(380, 380)  # Slightly reduced to allow space for Patient Info
             self.before_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.before_label.setStyleSheet("border: 1px solid gray; background-color: black;")
-            self.before_label.setText("No image loaded")
+            self.before_label.setText("No image loaded\nSelect an input folder")
             self.before_label.setScaledContents(False)  # We'll scale manually
             self.before_label.object_selected.connect(self.on_object_selected)
             self.before_label.parent_wizard = self
@@ -853,21 +865,24 @@ class PreprocessWizard(QWidget):
             hl2.addWidget(self.sat_spin)
             params_layout.addLayout(hl2)
 
-            # remove non-grayscale checkbox
-            self.remove_non_grayscale_cb = QCheckBox("Remove non-grayscale pixels (turn black)")
+            # remove non-grayscale checkbox and convert to grayscale checkbox on same row
+            grayscale_row = QHBoxLayout()
+            self.remove_non_grayscale_cb = QCheckBox("Remove non-grayscale pixels")
             self.remove_non_grayscale_cb.setChecked(False)
             self.remove_non_grayscale_cb.toggled.connect(self._on_non_grayscale_toggled)
-            params_layout.addWidget(self.remove_non_grayscale_cb)
+            grayscale_row.addWidget(self.remove_non_grayscale_cb)
             
-            # remove overlays checkbox (automatic grayscale conversion)
-            self.remove_overlays_cb = QCheckBox("Remove colored overlays (convert to grayscale)")
+            # convert to grayscale checkbox (automatic grayscale conversion)
+            self.remove_overlays_cb = QCheckBox("Convert to grayscale")
             self.remove_overlays_cb.setChecked(False)  # Default: disabled (preserve colors)
             self.remove_overlays_cb.setToolTip(
                 "If enabled, automatically converts colored overlays (text, markers) to grayscale.\n"
                 "Disable this to preserve original colors in JPEG images."
             )
             self.remove_overlays_cb.toggled.connect(self.update_preview)
-            params_layout.addWidget(self.remove_overlays_cb)
+            grayscale_row.addWidget(self.remove_overlays_cb)
+            grayscale_row.addStretch()
+            params_layout.addLayout(grayscale_row)
             
             # Slice reordering button
             reorder_layout = QHBoxLayout()
@@ -916,18 +931,21 @@ class PreprocessWizard(QWidget):
             click_tolerance_layout.addWidget(self.click_tolerance_spin)
             selection_layout.addLayout(click_tolerance_layout)
             
+            # All buttons on the same line
+            buttons_row = QHBoxLayout()
+            buttons_row.setSpacing(5)  # Small spacing between buttons
+            
             self.select_objects_btn = QPushButton("Start Selection Mode")
             self.select_objects_btn.setEnabled(False)
             self.select_objects_btn.clicked.connect(self.toggle_selection_mode)
-            selection_layout.addWidget(self.select_objects_btn)
+            buttons_row.addWidget(self.select_objects_btn)
             
             self.clear_selection_btn = QPushButton("Clear All Selections")
             self.clear_selection_btn.setEnabled(False)
             self.clear_selection_btn.clicked.connect(self.clear_object_selection)
-            selection_layout.addWidget(self.clear_selection_btn)
+            buttons_row.addWidget(self.clear_selection_btn)
             
             # Auto-detect bed/headrest button with settings
-            auto_detect_layout = QHBoxLayout()
             self.auto_detect_btn = QPushButton("Auto-Detect Bed/Headrest")
             self.auto_detect_btn.setEnabled(False)
             self.auto_detect_btn.clicked.connect(self.auto_detect_bed_headrest)
@@ -937,7 +955,7 @@ class PreprocessWizard(QWidget):
                 "It will find multiple bed components and include grey pixels.\n"
                 "If the bed is on the side or top, use the rotation buttons first."
             )
-            auto_detect_layout.addWidget(self.auto_detect_btn)
+            buttons_row.addWidget(self.auto_detect_btn)
             
             # Settings icon button
             self.auto_detect_settings_btn = QPushButton("⚙")
@@ -945,9 +963,10 @@ class PreprocessWizard(QWidget):
             self.auto_detect_settings_btn.setFixedWidth(30)
             self.auto_detect_settings_btn.setToolTip("Configure auto-detection parameters")
             self.auto_detect_settings_btn.clicked.connect(self.show_auto_detect_settings)
-            auto_detect_layout.addWidget(self.auto_detect_settings_btn)
+            buttons_row.addWidget(self.auto_detect_settings_btn)
             
-            selection_layout.addLayout(auto_detect_layout)
+            buttons_row.addStretch()  # Push buttons to the left
+            selection_layout.addLayout(buttons_row)
             
             # Image transformation controls (rotation and cropping)
             transform_group = QGroupBox("Image Transformation")
@@ -980,31 +999,28 @@ class PreprocessWizard(QWidget):
             rotation_section.addLayout(rotation_status_layout)
             transform_layout.addLayout(rotation_section)
             
-            # Crop section
-            transform_layout.addWidget(QLabel("Crop:"))
-            transform_layout.addWidget(QLabel("Note: Slice ranges for crops are managed in the modifications table below."))
-            
-            # Crop pixel selection
-            crop_pixel_layout = QHBoxLayout()
+            # Crop section - buttons on same row as label
+            crop_row = QHBoxLayout()
+            crop_row.addWidget(QLabel("Crop:"))
             self.start_crop_btn = QPushButton("Start Crop Selection")
             self.start_crop_btn.setEnabled(False)
             self.start_crop_btn.setToolTip("Select pixels to keep using box or lasso tool. After selection, click 'Add Crop' to add it to the table.")
             self.start_crop_btn.clicked.connect(self.toggle_crop_mode)
-            crop_pixel_layout.addWidget(self.start_crop_btn)
+            crop_row.addWidget(self.start_crop_btn)
             
             self.cancel_crop_btn = QPushButton("Cancel Crop")
             self.cancel_crop_btn.setEnabled(False)
             self.cancel_crop_btn.setToolTip("Cancel the current crop selection and exit crop mode")
             self.cancel_crop_btn.clicked.connect(self.cancel_crop)
-            crop_pixel_layout.addWidget(self.cancel_crop_btn)
+            crop_row.addWidget(self.cancel_crop_btn)
             
             self.add_crop_btn = QPushButton("Add Crop")
             self.add_crop_btn.setEnabled(False)
             self.add_crop_btn.setToolTip("Add the current crop selection to the modifications table")
             self.add_crop_btn.clicked.connect(self.add_crop_to_table)
-            crop_pixel_layout.addWidget(self.add_crop_btn)
-            crop_pixel_layout.addStretch()
-            transform_layout.addLayout(crop_pixel_layout)
+            crop_row.addWidget(self.add_crop_btn)
+            crop_row.addStretch()
+            transform_layout.addLayout(crop_row)
             
             selection_layout.addWidget(transform_group)
             
@@ -1032,10 +1048,10 @@ class PreprocessWizard(QWidget):
             after_layout = QVBoxLayout()
             after_layout.addWidget(QLabel("After preprocessing:"))
             self.after_label = QLabel()
-            self.after_label.setMinimumSize(400, 400)
+            self.after_label.setMinimumSize(380, 380)  # Slightly reduced to allow space for Patient Info
             self.after_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.after_label.setStyleSheet("border: 1px solid gray; background-color: black;")
-            self.after_label.setText("No image loaded")
+            self.after_label.setText("No image loaded\nSelect an input folder")
             self.after_label.setScaledContents(False)  # We'll scale manually
             after_layout.addWidget(self.after_label, stretch=1)
             preview_images_layout.addLayout(after_layout, stretch=1)  # Equal stretch for images
@@ -1131,7 +1147,13 @@ class PreprocessWizard(QWidget):
         # ------------------------------------------------------------------
         run_btn = QPushButton("Export processed images")
         run_btn.clicked.connect(self.run_preprocessing)
-        layout.addWidget(run_btn)
+        run_btn.setMaximumWidth(300)  # Smaller width
+        run_btn.setStyleSheet("font-weight: bold; font-size: 14pt;")  # Bigger, bold font
+        export_btn_layout = QHBoxLayout()
+        export_btn_layout.addStretch()
+        export_btn_layout.addWidget(run_btn)
+        export_btn_layout.addStretch()
+        layout.addLayout(export_btn_layout)
 
         # Don't add stretch - let preview section be visible
 
@@ -1147,11 +1169,13 @@ class PreprocessWizard(QWidget):
             dir_path = Path(dlg.selectedFiles()[0])
             self.input_dir = dir_path
             self.input_label.setText(f"Input directory: {dir_path}")
+            self.input_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
             # Auto-suggest processed_slices under the input dir
             auto_out = dir_path / "processed_slices"
             self.output_dir = auto_out
             self.output_label.setText(f"Processed directory: {auto_out}")
+            self.output_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
             # Load image paths and initialize preview
             self.load_image_paths()
@@ -1165,6 +1189,7 @@ class PreprocessWizard(QWidget):
             dir_path = Path(dlg.selectedFiles()[0])
             self.output_dir = dir_path
             self.output_label.setText(f"Processed directory: {dir_path}")
+            self.output_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     # ----------------------------------------------------------------------
     # Run preprocessing
@@ -1398,6 +1423,10 @@ class PreprocessWizard(QWidget):
                 # Schedule another update after a short delay to ensure UI is fully laid out
                 QTimer.singleShot(50, self.update_preview)
                 QTimer.singleShot(200, self.update_preview)  # Second update after layout settles
+                
+                # Notify main window to update patient info if callback is set
+                if hasattr(self, '_patient_info_callback') and self._patient_info_callback:
+                    QTimer.singleShot(100, self._patient_info_callback)
             else:
                 self.image_selector.setEnabled(False)
                 self.image_count_label.setText("of 0")
@@ -2631,3 +2660,51 @@ class PreprocessWizard(QWidget):
                 f"Error while renaming files:\n\n{str(e)}\n\n"
                 "Some files may have been renamed. Please check the source folder."
             )
+    
+    def get_patient_info(self) -> tuple[str, str]:
+        """
+        Get patient info text and style from DICOM metadata if available.
+        
+        Returns
+        -------
+        tuple[str, str]
+            Tuple of (text, style) for the patient info label
+        """
+        if not self.image_paths:
+            return ("No DICOM files loaded", "color: gray;")
+        
+        # Try to get patient info from first DICOM file
+        patient_info = images.get_dicom_patient_info(self.image_paths[0])
+        
+        if patient_info:
+            # Format patient info nicely
+            lines = []
+            if 'PatientName' in patient_info:
+                lines.append(f"<b>Patient Name:</b> {patient_info['PatientName']}")
+            if 'PatientID' in patient_info:
+                lines.append(f"<b>Patient ID:</b> {patient_info['PatientID']}")
+            if 'PatientBirthDate' in patient_info:
+                lines.append(f"<b>Birth Date:</b> {patient_info['PatientBirthDate']}")
+            if 'PatientSex' in patient_info:
+                lines.append(f"<b>Sex:</b> {patient_info['PatientSex']}")
+            if 'StudyDate' in patient_info:
+                lines.append(f"<b>Study Date:</b> {patient_info['StudyDate']}")
+            if 'StudyTime' in patient_info:
+                lines.append(f"<b>Study Time:</b> {patient_info['StudyTime']}")
+            if 'StudyDescription' in patient_info:
+                lines.append(f"<b>Study Description:</b> {patient_info['StudyDescription']}")
+            if 'Modality' in patient_info:
+                lines.append(f"<b>Modality:</b> {patient_info['Modality']}")
+            
+            if lines:
+                return ("<br>".join(lines), "color: white;")
+            else:
+                return ("DICOM file loaded (no patient info available)", "color: gray;")
+        else:
+            return ("No DICOM files loaded", "color: gray;")
+    
+    def _update_patient_info(self) -> None:
+        """Update patient info - now just a placeholder for compatibility."""
+        # This method is kept for compatibility but does nothing
+        # The main window will call get_patient_info() instead
+        pass

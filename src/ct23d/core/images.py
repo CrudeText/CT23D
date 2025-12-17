@@ -120,6 +120,58 @@ def get_dicom_z_position(path: Path) -> Optional[float]:
         return None
 
 
+def get_dicom_patient_info(path: Path) -> Optional[dict[str, str]]:
+    """
+    Extract patient information from a DICOM file.
+    
+    Parameters
+    ----------
+    path : Path
+        Path to DICOM file
+        
+    Returns
+    -------
+    Optional[dict[str, str]]
+        Dictionary with patient information fields, or None if not a DICOM file or error occurs.
+        Keys: 'PatientName', 'PatientID', 'PatientBirthDate', 'PatientSex', 
+              'StudyDate', 'StudyTime', 'StudyDescription', 'Modality'
+    """
+    if not HAS_PYDICOM:
+        return None
+    
+    if not _is_dicom_file(path):
+        return None
+    
+    try:
+        ds = pydicom.dcmread(str(path), stop_before_pixels=True)  # Read metadata only
+        
+        info: dict[str, str] = {}
+        
+        # Patient information
+        if hasattr(ds, 'PatientName') and ds.PatientName:
+            info['PatientName'] = str(ds.PatientName)
+        if hasattr(ds, 'PatientID') and ds.PatientID:
+            info['PatientID'] = str(ds.PatientID)
+        if hasattr(ds, 'PatientBirthDate') and ds.PatientBirthDate:
+            info['PatientBirthDate'] = str(ds.PatientBirthDate)
+        if hasattr(ds, 'PatientSex') and ds.PatientSex:
+            info['PatientSex'] = str(ds.PatientSex)
+        
+        # Study information
+        if hasattr(ds, 'StudyDate') and ds.StudyDate:
+            info['StudyDate'] = str(ds.StudyDate)
+        if hasattr(ds, 'StudyTime') and ds.StudyTime:
+            info['StudyTime'] = str(ds.StudyTime)
+        if hasattr(ds, 'StudyDescription') and ds.StudyDescription:
+            info['StudyDescription'] = str(ds.StudyDescription)
+        if hasattr(ds, 'Modality') and ds.Modality:
+            info['Modality'] = str(ds.Modality)
+        
+        return info if info else None
+    except Exception:
+        return None
+
+
 def _load_dicom_image(path: Path, rotation: int = 0) -> np.ndarray:
     """
     Load a DICOM file as a grayscale array preserving full intensity range.

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -60,6 +60,9 @@ class MesherWizard(QWidget):
         self._output_dir: Optional[Path] = None
         self._volume: Optional[np.ndarray] = None
         self._current_range: Tuple[float, float] = (0.0, 255.0)
+        self._num_slices: int = 0  # Track number of slices for Z height calculation
+        self._histogram_values: Optional[np.ndarray] = None  # Store histogram values for auto-bin
+        self._is_dicom: bool = False  # Track if volume is DICOM (uint16) or normal (uint8)
 
         self._build_ui()
 
@@ -69,28 +72,113 @@ class MesherWizard(QWidget):
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
 
-        # Top: processed directory selector
+        # Top: processed directory selector (button on left, label on right)
         top_row = QHBoxLayout()
-        self.processed_label = QLabel("Processed slices directory: (none)")
+        top_row.setSpacing(8)  # Small spacing between button and label
         self.btn_select_processed = QPushButton("Select Folder (or use default)")
+        self.btn_select_processed.setMaximumWidth(180)  # Smaller button
         self.btn_select_processed.clicked.connect(self._on_select_processed_dir)
-        top_row.addWidget(self.processed_label, stretch=1)
         top_row.addWidget(self.btn_select_processed)
+        self.processed_label = QLabel("Processed slices directory: (none)")
+        self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        top_row.addWidget(self.processed_label)
+        top_row.addStretch()  # Push everything to the left
         main_layout.addLayout(top_row)
 
         # 3D Histogram + bin table + preview
         middle_layout = QHBoxLayout()
         
         # Left: Histogram (tabbed view)
+        histogram_container = QVBoxLayout()
+        histogram_container.setContentsMargins(0, 50, 0, 0)  # Add top margin to lower it, giving space for Patient Info
+        
         from ct23d.gui.mesher.histogram_tabbed_view import HistogramTabbedView
         self.histogram = HistogramTabbedView(self)
         # Connect bin boundary changes to update table
         self.histogram.set_bin_boundary_callback(self._on_histogram_bin_moved)
-        middle_layout.addWidget(self.histogram, stretch=3)
+        # Connect range line changes to update auto-bin controls
+        self.histogram.set_range_line_callback(self._on_range_line_moved)
+        histogram_container.addWidget(self.histogram)
+        
+        histogram_widget = QWidget()
+        histogram_widget.setLayout(histogram_container)
+        middle_layout.addWidget(histogram_widget, stretch=3)
         
         # Middle: Bin table with controls
+        # Wrap in a container with spacer to align top with histogram/preview content (below their headers)
+        bin_container = QWidget()
+        bin_container_layout = QVBoxLayout(bin_container)
+        bin_container_layout.setContentsMargins(0, 50, 0, 0)  # Add top margin to align with histogram/preview
+        bin_container_layout.setSpacing(0)
+        
         bin_group = QGroupBox("Intensity Bins")
         bin_layout = QVBoxLayout(bin_group)
+        
+        # Auto-bin section
+        auto_bin_group = QGroupBox("Auto-bin")
+        auto_bin_layout = QVBoxLayout(auto_bin_group)
+        
+        # Min/Max intensity range with Visualize checkbox
+        min_max_row = QHBoxLayout()
+        min_max_row.addWidget(QLabel("Intensity range:"))
+        self.auto_bin_min_spin = QSpinBox()
+        self.auto_bin_min_spin.setRange(1, 255)
+        self.auto_bin_min_spin.setValue(1)
+        self.auto_bin_min_spin.setToolTip("Minimum intensity for auto-bin range (draggable on histogram when visualized)")
+        self.auto_bin_min_spin.valueChanged.connect(self._on_auto_bin_range_changed)
+        min_max_row.addWidget(self.auto_bin_min_spin)
+        min_max_row.addWidget(QLabel("to"))
+        self.auto_bin_max_spin = QSpinBox()
+        self.auto_bin_max_spin.setRange(1, 255)
+        self.auto_bin_max_spin.setValue(255)
+        self.auto_bin_max_spin.setToolTip("Maximum intensity for auto-bin range (draggable on histogram when visualized)")
+        self.auto_bin_max_spin.valueChanged.connect(self._on_auto_bin_range_changed)
+        min_max_row.addWidget(self.auto_bin_max_spin)
+        self.visualize_range_cb = QCheckBox("Visualize")
+        self.visualize_range_cb.setToolTip("Show range lines (min/max) on histogram graphs")
+        self.visualize_range_cb.setChecked(False)
+        self.visualize_range_cb.toggled.connect(self._on_visualize_range_toggled)
+        min_max_row.addWidget(self.visualize_range_cb)
+        min_max_row.addStretch()
+        auto_bin_layout.addLayout(min_max_row)
+        
+        # Number of bins
+        num_bins_row = QHBoxLayout()
+        num_bins_row.addWidget(QLabel("Number of bins:"))
+        self.auto_bin_count_spin = QSpinBox()
+        self.auto_bin_count_spin.setRange(2, 20)
+        self.auto_bin_count_spin.setValue(6)
+        self.auto_bin_count_spin.setToolTip("Number of bins to generate")
+        num_bins_row.addWidget(self.auto_bin_count_spin)
+        num_bins_row.addStretch()
+        auto_bin_layout.addLayout(num_bins_row)
+        
+        # Uniformity parameter
+        uniformity_row = QHBoxLayout()
+        uniformity_row.addWidget(QLabel("Uniformity:"))
+        self.auto_bin_uniformity_spin = QDoubleSpinBox()
+        self.auto_bin_uniformity_spin.setRange(0.0, 1.0)
+        self.auto_bin_uniformity_spin.setDecimals(2)
+        self.auto_bin_uniformity_spin.setSingleStep(0.1)
+        self.auto_bin_uniformity_spin.setValue(0.0)
+        self.auto_bin_uniformity_spin.setToolTip(
+            "0.0 = auto-bins has full control based on intensity distribution\n"
+            "1.0 = uniform bins between min/max values"
+        )
+        uniformity_row.addWidget(self.auto_bin_uniformity_spin)
+        uniformity_row.addStretch()
+        auto_bin_layout.addLayout(uniformity_row)
+        
+        # Auto-bin button
+        auto_bin_button_row = QHBoxLayout()
+        self.btn_apply_auto_bins = QPushButton("Apply Auto-bins")
+        self.btn_apply_auto_bins.clicked.connect(self._on_apply_auto_bins)
+        self.btn_apply_auto_bins.setEnabled(False)
+        auto_bin_button_row.addWidget(self.btn_apply_auto_bins)
+        auto_bin_button_row.addStretch()
+        auto_bin_layout.addLayout(auto_bin_button_row)
+        
+        bin_layout.addWidget(auto_bin_group)
         
         # Add button
         bin_buttons = QHBoxLayout()
@@ -127,11 +215,19 @@ class MesherWizard(QWidget):
         )
         bin_layout.addWidget(self.continuous_bins_cb)
         
-        middle_layout.addWidget(bin_group, stretch=2)
+        # Add bin group to container - make it stretch to fill full height
+        bin_container_layout.addWidget(bin_group, stretch=1)  # Stretch to fill available height
+        # Don't add stretch here - we want bins box to fill all available space down to bottom
         
-        # Right: Preview - make it bigger
+        middle_layout.addWidget(bin_container, stretch=2)
+        
+        # Right: Preview - make it bigger, add top margin to lower it
+        preview_container = QWidget()
+        preview_container_layout = QVBoxLayout(preview_container)
+        preview_container_layout.setContentsMargins(0, 50, 0, 0)  # Add top margin to lower it, giving space for Patient Info
         self.slice_preview = SlicePreviewWidget(self)
-        middle_layout.addWidget(self.slice_preview, stretch=2)  # Give it more space
+        preview_container_layout.addWidget(self.slice_preview)
+        middle_layout.addWidget(preview_container, stretch=2)  # Give it more space
 
         main_layout.addLayout(middle_layout)
 
@@ -163,12 +259,19 @@ class MesherWizard(QWidget):
         spacing_row.addWidget(QLabel("Voxel spacing (mm):"))
         spacing_row.addWidget(QLabel("Z:"))
         self.spin_spacing_z = QDoubleSpinBox()
-        self.spin_spacing_z.setRange(0.01, 100.0)
+        self.spin_spacing_z.setRange(0.0, 100.0)
         self.spin_spacing_z.setDecimals(2)
         self.spin_spacing_z.setSingleStep(0.1)
-        self.spin_spacing_z.setValue(1.6)
+        self.spin_spacing_z.setValue(1.0)
         self.spin_spacing_z.setToolTip("Slice thickness in millimeters (Z direction)")
+        self.spin_spacing_z.valueChanged.connect(self._update_z_height)  # Update Z height when changed
         spacing_row.addWidget(self.spin_spacing_z)
+        
+        # Z height calculation label (number of slices × voxel spacing)
+        self.z_height_label = QLabel("Z height: —")
+        self.z_height_label.setStyleSheet("font-weight: bold;")
+        spacing_row.addWidget(QLabel("|"))
+        spacing_row.addWidget(self.z_height_label)
         
         spacing_row.addWidget(QLabel("Y:"))
         self.spin_spacing_y = QDoubleSpinBox()
@@ -384,7 +487,13 @@ class MesherWizard(QWidget):
         self.btn_export_meshes = QPushButton("Export meshes")
         self.btn_export_meshes.clicked.connect(self.on_export_meshes_clicked)
         self.btn_export_meshes.setEnabled(False)
-        main_layout.addWidget(self.btn_export_meshes)
+        self.btn_export_meshes.setMaximumWidth(300)  # Smaller width
+        self.btn_export_meshes.setStyleSheet("font-weight: bold; font-size: 14pt;")  # Bigger, bold font
+        export_btn_layout = QHBoxLayout()
+        export_btn_layout.addStretch()
+        export_btn_layout.addWidget(self.btn_export_meshes)
+        export_btn_layout.addStretch()
+        main_layout.addLayout(export_btn_layout)
 
     # ------------------------------------------------------------------ #
     # File size estimation
@@ -637,9 +746,14 @@ class MesherWizard(QWidget):
             return
         self._processed_dir = Path(folder)
         self.processed_label.setText(f"Processed slices directory: {folder}")
+        self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
-        # Auto-load volume and show preview with default bins
-        self.load_volume_and_histogram()
+        # Auto-load volume and show preview (but don't auto-populate bins)
+        self.load_volume_only()
+        
+        # Notify main window to update patient info if callback is set
+        if hasattr(self, '_patient_info_callback') and self._patient_info_callback:
+            QTimer.singleShot(100, self._patient_info_callback)
     
     def set_default_processed_dir(self, path: Optional[Path]) -> None:
         """
@@ -654,14 +768,20 @@ class MesherWizard(QWidget):
                 self.processed_label.setText(
                     f"Processed slices directory: {path} (default from preprocessing)"
                 )
-                # Auto-load volume and show preview with default bins
-                self.load_volume_and_histogram()
+                self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                # Auto-load volume and show preview (but don't auto-populate bins)
+                self.load_volume_only()
+                
+                # Notify main window to update patient info if callback is set
+                if hasattr(self, '_patient_info_callback') and self._patient_info_callback:
+                    QTimer.singleShot(100, self._patient_info_callback)
             else:
                 # Update label to show default is available
                 self.processed_label.setText(
                     f"Processed slices directory: {self._processed_dir}\n"
                     f"(Default available: {path})"
                 )
+                self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     def _on_select_output_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -899,6 +1019,78 @@ class MesherWizard(QWidget):
                     next_low_spin.setValue(value)
                     next_low_spin.blockSignals(False)
     
+    def _on_visualize_range_toggled(self, checked: bool) -> None:
+        """Called when the Visualize checkbox is toggled."""
+        self._update_range_lines_on_histogram()
+        self._update_preview_intensity_range()
+    
+    def _update_range_lines_on_histogram(self) -> None:
+        """Update the range lines (min/max) on histogram views."""
+        if hasattr(self, 'histogram') and self._current_range is not None:
+            # Only show range lines if visualize checkbox is checked
+            if hasattr(self, 'visualize_range_cb') and self.visualize_range_cb.isChecked():
+                bin_min = self.auto_bin_min_spin.value()
+                bin_max = self.auto_bin_max_spin.value()
+                self.histogram.update_range_lines(bin_min, bin_max)
+            else:
+                # Hide range lines
+                self.histogram.update_range_lines(None, None)
+    
+    def _update_preview_intensity_range(self) -> None:
+        """Update the intensity range highlighting in slice preview."""
+        if hasattr(self, 'visualize_range_cb') and self.visualize_range_cb.isChecked():
+            min_val = self.auto_bin_min_spin.value()
+            max_val = self.auto_bin_max_spin.value()
+            self.slice_preview.set_intensity_range(min_val, max_val)
+        else:
+            self.slice_preview.set_intensity_range(None, None)
+    
+    def _on_auto_bin_range_changed(self) -> None:
+        """Called when auto-bin range spinboxes change."""
+        # Update range lines on histogram
+        self._update_range_lines_on_histogram()
+        # Update preview highlighting
+        self._update_preview_intensity_range()
+        # Ensure min < max
+        min_val = self.auto_bin_min_spin.value()
+        max_val = self.auto_bin_max_spin.value()
+        if min_val >= max_val:
+            # Adjust to ensure min < max
+            if self.auto_bin_min_spin.hasFocus():
+                # Min was changed, adjust max
+                self.auto_bin_max_spin.blockSignals(True)
+                self.auto_bin_max_spin.setValue(min_val + 1)
+                self.auto_bin_max_spin.blockSignals(False)
+            else:
+                # Max was changed, adjust min
+                self.auto_bin_min_spin.blockSignals(True)
+                self.auto_bin_min_spin.setValue(max(1, max_val - 1))
+                self.auto_bin_min_spin.blockSignals(False)
+    
+    def _on_range_line_moved(self, line_type: str, new_value: float) -> None:
+        """Called when a range line (min/max) is dragged on the histogram."""
+        new_int = int(round(new_value))
+        if line_type == 'min':
+            # Ensure min < max
+            current_max = self.auto_bin_max_spin.value()
+            if new_int >= current_max:
+                new_int = max(1, current_max - 1)
+            self.auto_bin_min_spin.blockSignals(True)
+            self.auto_bin_min_spin.setValue(new_int)
+            self.auto_bin_min_spin.blockSignals(False)
+        elif line_type == 'max':
+            # Ensure max > min
+            current_min = self.auto_bin_min_spin.value()
+            if new_int <= current_min:
+                new_int = current_min + 1
+            self.auto_bin_max_spin.blockSignals(True)
+            self.auto_bin_max_spin.setValue(new_int)
+            self.auto_bin_max_spin.blockSignals(False)
+        # Update preview highlighting (doesn't recreate lines)
+        self._update_preview_intensity_range()
+        # DO NOT call _update_range_lines_on_histogram() here - it recreates the lines
+        # The lines are updated directly in the histogram view's _on_range_line_moved
+    
     def _on_histogram_bin_moved(self, bin_table_row: int, boundary_type: str, new_value: float) -> None:
         """Called when a bin boundary is dragged on the histogram."""
         # Ensure minimum is at least 1
@@ -929,6 +1121,344 @@ class MesherWizard(QWidget):
     # ------------------------------------------------------------------ #
     # Volume loading + histogram (threaded)
     # ------------------------------------------------------------------ #
+    def load_volume_only(self) -> None:
+        """Load volume and show slice previews, but don't compute histogram or auto-populate bins."""
+        if self._processed_dir is None:
+            self.status.show_error("Please select a processed slices directory first.")
+            return
+
+        folder = self._processed_dir
+
+        # Precompute list of slice files so we know how many there are
+        paths = images.list_slice_files(folder)
+        total_slices = len(paths)
+        self._num_slices = total_slices  # Store for Z height calculation
+        if total_slices == 0:
+            self.status.show_error("No image slices found in the selected directory.")
+            self._update_z_height()  # Update to show no slices
+            return
+
+        # Create a custom worker that handles loading only
+        class VolumeLoadWorker(WorkerBase):
+            phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
+            
+            def run(self) -> None:  # type: ignore[override]
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    
+                    # Phase 1: Loading image slices
+                    slices = []
+                    for i, p in enumerate(paths, start=1):
+                        if self.isInterruptionRequested():
+                            raise InterruptedError("Loading was cancelled")
+                        arr = images.load_image_rgb(p)
+                        slices.append(arr)
+                        # Emit phase progress - total includes slices + building + histogram computation
+                        # Histogram computation will process all slices, so total = slices + 1 (building) + slices (histogram)
+                        total_phases = total_slices + 1 + total_slices
+                        self.phase_progress.emit("Loading image slices", i, total_slices, total_phases)
+                        # Also emit standard progress for compatibility
+                        self.progress.emit(i, total_phases)
+                        # Process events less frequently
+                        if i % 50 == 0:
+                            QApplication.processEvents()
+                    
+                    # Phase 2: Building volume
+                    total_phases = total_slices + 1 + total_slices
+                    self.phase_progress.emit("Building volume", 1, 1, total_phases)
+                    self.progress.emit(total_slices + 1, total_phases)
+                    volume = np.stack(slices, axis=0)  # (Z, Y, X, 3)
+                    
+                    self.finished.emit((volume,))
+                except InterruptedError:
+                    self.error.emit("Loading was cancelled by user")
+                except BaseException as exc:  # noqa: BLE001
+                    self._handle_exception(exc)
+        
+        worker = VolumeLoadWorker()
+        
+        def on_success(result: object, progress_dialog=None, progress_updater=None) -> None:
+            from PySide6.QtWidgets import QApplication
+            
+            volume, = result  # type: ignore[misc]
+            self._volume = volume
+
+            # Get reference to the progress dialog from status controller
+            # We need to access it to update progress during histogram computation
+            # The dialog should still be visible at this point
+            
+            # Process events before starting
+            QApplication.processEvents()
+            
+            # Compute intensity range for auto-bin controls
+            try:
+                if volume.ndim == 4 and volume.shape[-1] == 3:
+                    grayscale = volume.max(axis=-1)
+                else:
+                    grayscale = volume
+                intensities = grayscale.ravel()
+                non_zero = intensities[intensities > 0]
+                if non_zero.size > 0:
+                    vmin = float(non_zero.min())
+                    vmax = float(non_zero.max())
+                    self._histogram_values = non_zero
+                else:
+                    vmin = float(intensities.min())
+                    vmax = float(intensities.max())
+                    self._histogram_values = intensities
+                
+                self._current_range = (vmin, vmax)
+                
+                # Detect if DICOM (uint16) or normal image (uint8)
+                # DICOM typically has max intensity > 255, normal images max <= 255
+                self._is_dicom = vmax > 255
+                
+                # Update auto-bin controls with detected range (adapt to DICOM vs normal)
+                vmin_int = max(1, int(round(vmin)))
+                vmax_int = int(round(vmax))
+                max_range = 65535 if self._is_dicom else 255  # uint16 max or uint8 max
+                
+                self.auto_bin_min_spin.setRange(1, max_range)
+                self.auto_bin_max_spin.setRange(1, max_range)
+                self.auto_bin_min_spin.setValue(vmin_int)
+                self.auto_bin_max_spin.setValue(vmax_int)
+                
+                # Update range lines on histogram if already computed
+                if hasattr(self, 'histogram'):
+                    self._update_range_lines_on_histogram()
+            except Exception as e:
+                print(f"Error computing intensity range: {e}")
+                # Use defaults
+                self._current_range = (1.0, 255.0)
+                self._histogram_values = None
+            
+            # Update preview (no bins yet, but show images) - quick operation
+            try:
+                self.slice_preview.set_volume(volume)
+                # Don't set bins - let preview show raw images
+                # The preview widget should display images even without bins
+                QApplication.processEvents()
+                # Force a refresh
+                self.slice_preview.update()
+                QApplication.processEvents()
+            except Exception as e:
+                print(f"Error setting up preview: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Enable buttons
+            self.btn_apply_auto_bins.setEnabled(True)
+            
+            # Update Z height calculation
+            self._update_z_height()
+            
+            # Now compute histogram graphs - update the existing progress dialog
+            num_slices = volume.shape[0]
+            base_progress = total_slices + 1  # Already completed: slices + building volume
+            total_with_histograms = total_slices + 1 + num_slices  # slices + building + histogram computation
+            
+            # Progress callback to update the main progress dialog
+            def on_histogram_progress(current: int, total: int) -> None:
+                """Update progress dialog based on actual histogram computation progress."""
+                if progress_dialog is not None and progress_updater is not None:
+                    # Update phase progress for histogram computation
+                    overall_current = base_progress + current
+                    progress_updater("Computing histograms", current, total, total_with_histograms)
+                    # Also update overall progress
+                    if progress_dialog.maximum() != total_with_histograms:
+                        progress_dialog.setMaximum(total_with_histograms)
+                    progress_dialog.setValue(overall_current)
+                    QApplication.processEvents()
+            
+            try:
+                # Update progress dialog to show histogram computation phase
+                if progress_dialog is not None:
+                    progress_dialog.setMaximum(total_with_histograms)
+                    progress_dialog.setValue(base_progress)
+                    if progress_updater is not None:
+                        progress_updater("Computing histograms", 0, num_slices, total_with_histograms)
+                    QApplication.processEvents()
+                
+                # Update both histogram graphs (aggregated and slice-by-slice heatmap)
+                # Pass progress callback to track actual progress during computation
+                self.histogram.set_histogram_3d(
+                    volume, 
+                    n_bins=256, 
+                    value_range=(vmin, vmax),
+                    progress_callback=on_histogram_progress if progress_dialog is not None else None
+                )
+                
+                # Complete histogram phase
+                if progress_dialog is not None and progress_updater is not None:
+                    progress_updater("Computing histograms", num_slices, num_slices, total_with_histograms)
+                    progress_dialog.setValue(total_with_histograms)
+                    QApplication.processEvents()
+                
+                # Update range lines on histogram if visualize is enabled
+                self._update_range_lines_on_histogram()
+                QApplication.processEvents()
+            except Exception as e:
+                print(f"Error computing histogram graphs: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Run volume loading with progress
+        self.status.run_threaded_with_progress(
+            worker,
+            "Loading volume...",
+            on_success=on_success,
+        )
+    
+    def _on_apply_auto_bins(self) -> None:
+        """Apply auto-bin generation with user-specified parameters."""
+        if self._volume is None:
+            self.status.show_error("Please load a volume first.")
+            return
+        
+        # Get parameters from UI
+        bin_min = self.auto_bin_min_spin.value()
+        bin_max = self.auto_bin_max_spin.value()
+        n_bins = self.auto_bin_count_spin.value()
+        uniformity = self.auto_bin_uniformity_spin.value()
+        
+        if bin_min >= bin_max:
+            self.status.show_error("Minimum intensity must be less than maximum intensity.")
+            return
+        
+        # Get histogram values if available, otherwise compute
+        if not hasattr(self, '_histogram_values') or self._histogram_values is None:
+            volume = self._volume
+            if volume.ndim == 4 and volume.shape[-1] == 3:
+                grayscale = volume.max(axis=-1)
+            else:
+                grayscale = volume
+            intensities = grayscale.ravel()
+            non_zero = intensities[intensities > 0]
+            self._histogram_values = non_zero if non_zero.size > 0 else intensities
+        
+        hist_values = self._histogram_values
+        
+        # Generate bins based on uniformity parameter
+        from ct23d.core import bins as binsmod
+        from ct23d.core.models import IntensityBin
+        import colorsys
+        
+        if uniformity >= 1.0:
+            # Pure uniform bins
+            edges = np.linspace(bin_min, bin_max, num=n_bins + 1, endpoint=True)
+            edges = np.round(edges).astype(int)
+            generated_bins = []
+            for idx in range(n_bins):
+                low = int(edges[idx])
+                high = int(edges[idx + 1])
+                if high <= low:
+                    high = low + 1
+                if low < 1:
+                    low = 1
+                    if high <= low:
+                        high = low + 1
+                generated_bins.append(
+                    IntensityBin(
+                        index=idx,
+                        low=low,
+                        high=high,
+                        name=f"bin_{idx:02d}",
+                        color=None,
+                        enabled=True,
+                    )
+                )
+        elif uniformity <= 0.0:
+            # Pure auto-bins (full control based on intensity distribution)
+            # Filter histogram values to user-specified range
+            filtered_values = hist_values[(hist_values >= bin_min) & (hist_values <= bin_max)]
+            if filtered_values.size == 0:
+                # Fallback to uniform if no values in range
+                filtered_values = hist_values
+            optimal_bins = binsmod.generate_optimal_bins(filtered_values, min_bins=n_bins, max_bins=n_bins)
+            generated_bins = optimal_bins
+        else:
+            # Interpolate between uniform and auto-bins
+            # Uniform bins
+            edges_uniform = np.linspace(bin_min, bin_max, num=n_bins + 1, endpoint=True)
+            edges_uniform = np.round(edges_uniform).astype(int)
+            uniform_bins = []
+            for idx in range(n_bins):
+                low = int(edges_uniform[idx])
+                high = int(edges_uniform[idx + 1])
+                if high <= low:
+                    high = low + 1
+                if low < 1:
+                    low = 1
+                    if high <= low:
+                        high = low + 1
+                uniform_bins.append((low, high))
+            
+            # Auto-bins
+            filtered_values = hist_values[(hist_values >= bin_min) & (hist_values <= bin_max)]
+            if filtered_values.size == 0:
+                filtered_values = hist_values
+            optimal_bins = binsmod.generate_optimal_bins(filtered_values, min_bins=n_bins, max_bins=n_bins)
+            
+            # Interpolate boundaries
+            auto_edges = []
+            if optimal_bins:
+                for bin in optimal_bins:
+                    auto_edges.append(bin.low)
+                auto_edges.append(optimal_bins[-1].high)
+            else:
+                auto_edges = edges_uniform.tolist()
+            
+            # Blend edges with more aggressive uniformity factor
+            # Use a power curve (uniformity^3) to make the effect more aggressive
+            # This means even small uniformity values will have stronger effect
+            aggressive_uniformity = uniformity ** 3
+            blended_edges = []
+            for i in range(len(edges_uniform)):
+                uniform_val = float(edges_uniform[i])
+                auto_val = float(auto_edges[i]) if i < len(auto_edges) else uniform_val
+                blended_val = aggressive_uniformity * uniform_val + (1.0 - aggressive_uniformity) * auto_val
+                blended_edges.append(int(round(blended_val)))
+            
+            # Ensure sorted and within range
+            blended_edges = sorted(blended_edges)
+            max_range = 65535 if self._is_dicom else 255
+            blended_edges[0] = max(1, bin_min)
+            blended_edges[-1] = min(max_range, bin_max)
+            
+            # Create bins from blended edges
+            generated_bins = []
+            for idx in range(n_bins):
+                low = blended_edges[idx]
+                high = blended_edges[idx + 1] if idx + 1 < len(blended_edges) else bin_max
+                if high <= low:
+                    high = low + 1
+                if low < 1:
+                    low = 1
+                    if high <= low:
+                        high = low + 1
+                generated_bins.append(
+                    IntensityBin(
+                        index=idx,
+                        low=low,
+                        high=high,
+                        name=f"bin_{idx:02d}",
+                        color=None,
+                        enabled=True,
+                    )
+                )
+        
+        # Populate bins table
+        vmin = float(bin_min)
+        vmax = float(bin_max)
+        self._populate_optimal_bins(generated_bins, vmin, vmax)
+        
+        # Update histogram with bin boundaries
+        bins = self._collect_bins_from_table()
+        if hasattr(self, 'histogram'):
+            self.histogram.update_bins(bins)
+        
+        self.status.show_info(f"Applied {len(generated_bins)} bins with uniformity {uniformity:.2f}.")
+    
     def load_volume_and_histogram(self) -> None:
         if self._processed_dir is None:
             self.status.show_error("Please select a processed slices directory first.")
@@ -939,8 +1469,10 @@ class MesherWizard(QWidget):
         # Precompute list of slice files so we know how many there are
         paths = images.list_slice_files(folder)
         total_slices = len(paths)
+        self._num_slices = total_slices  # Store for Z height calculation
         if total_slices == 0:
             self.status.show_error("No image slices found in the selected directory.")
+            self._update_z_height()  # Update to show no slices
             return
 
         # Create a custom worker that handles both loading and histogram computation
@@ -1074,17 +1606,84 @@ class MesherWizard(QWidget):
             
             self.btn_export_meshes.setEnabled(True)
             
+            # Update Z height calculation
+            self._update_z_height()
+            
             # Final process events to ensure everything is rendered
             QApplication.processEvents()
 
         # Run volume loading with progress (single dialog)
-        self.status.run_threaded_with_progress(
+            self.status.run_threaded_with_progress(
             worker,
             "Loading volume...",
             on_success=on_success,
         )
     
-
+    def _update_z_height(self) -> None:
+        """Update the Z height calculation display (number of slices × voxel spacing)."""
+        if self._num_slices > 0 and hasattr(self, 'spin_spacing_z'):
+            z_spacing = self.spin_spacing_z.value()
+            z_height = self._num_slices * z_spacing
+            self.z_height_label.setText(f"Z height: {z_height:.2f} mm ({self._num_slices} slices × {z_spacing:.2f} mm)")
+        else:
+            self.z_height_label.setText("Z height: —")
+    
+    def get_patient_info(self) -> tuple[str, str]:
+        """
+        Get patient info text and style from DICOM metadata if available.
+        
+        Returns
+        -------
+        tuple[str, str]
+            Tuple of (text, style) for the patient info label
+        """
+        if self._processed_dir is None:
+            return ("No DICOM files loaded", "color: gray;")
+        
+        # Get first file from the processed directory
+        try:
+            paths = images.list_slice_files(self._processed_dir)
+            if not paths:
+                return ("No DICOM files loaded", "color: gray;")
+            
+            # Try to get patient info from first DICOM file
+            patient_info = images.get_dicom_patient_info(paths[0])
+            
+            if patient_info:
+                # Format patient info nicely
+                lines = []
+                if 'PatientName' in patient_info:
+                    lines.append(f"<b>Patient Name:</b> {patient_info['PatientName']}")
+                if 'PatientID' in patient_info:
+                    lines.append(f"<b>Patient ID:</b> {patient_info['PatientID']}")
+                if 'PatientBirthDate' in patient_info:
+                    lines.append(f"<b>Birth Date:</b> {patient_info['PatientBirthDate']}")
+                if 'PatientSex' in patient_info:
+                    lines.append(f"<b>Sex:</b> {patient_info['PatientSex']}")
+                if 'StudyDate' in patient_info:
+                    lines.append(f"<b>Study Date:</b> {patient_info['StudyDate']}")
+                if 'StudyTime' in patient_info:
+                    lines.append(f"<b>Study Time:</b> {patient_info['StudyTime']}")
+                if 'StudyDescription' in patient_info:
+                    lines.append(f"<b>Study Description:</b> {patient_info['StudyDescription']}")
+                if 'Modality' in patient_info:
+                    lines.append(f"<b>Modality:</b> {patient_info['Modality']}")
+                
+                if lines:
+                    return ("<br>".join(lines), "color: white;")
+                else:
+                    return ("DICOM file loaded (no patient info available)", "color: gray;")
+            else:
+                return ("No DICOM files loaded", "color: gray;")
+        except Exception:
+            return ("No DICOM files loaded", "color: gray;")
+    
+    def _update_patient_info(self) -> None:
+        """Update patient info - now just a placeholder for compatibility."""
+        # This method is kept for compatibility but does nothing
+        # The main window will call get_patient_info() instead
+        pass
+    
     # ------------------------------------------------------------------ #
     # Export meshes
     # ------------------------------------------------------------------ #

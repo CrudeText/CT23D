@@ -63,8 +63,11 @@ The project is designed to be:
   - Cancellable operations
 - Output clean, processed slices ready for meshing
 
+![Preprocessing Tools](./images/preprocessing_tools.png)
+*Preprocessing interface with comprehensive tools for image transformation, object selection, and parameter configuration*
+
 ![Preprocessing Example](./images/preprocessing_example.png)
-*Preprocessing interface showing automatic bed detection (red bounding box) and before/after comparison*
+*Preprocessing example showing automatic bed detection (red bounding box) and before/after comparison*
 
 ### Meshing
 - Load processed slices into a 3D volume
@@ -78,7 +81,12 @@ The project is designed to be:
     - Color represents pixel count (log scale for visualization)
     - Vertical bin boundary lines aligned with intensity axis
 - **Interactive bin management:**
-  - **Automatic optimal bin detection:** Analyzes intensity distribution to determine optimal bin count and ranges
+  - **Auto-bin system:** Automatic intensity bin detection with configurable parameters
+    - Intensity range (min/max) that adapts to DICOM (uint16) vs standard (uint8) images
+    - Configurable number of bins
+    - Uniformity parameter (0-1): 1 for uniform bins, 0 for distribution-based (default: 0)
+    - Visualize checkbox to show/hide intensity range lines on graphs
+    - Draggable range lines on histogram and heatmap for real-time adjustment
   - Add/delete bins (per-row delete buttons)
   - Modify bin min/max values (integer intensity values, minimum 1)
   - Draggable bin boundaries on histogram with real-time updates
@@ -86,19 +94,26 @@ The project is designed to be:
   - Bin colors with preview
   - Enable/disable individual bins
   - Bin limits always start at intensity 1 minimum (0 is background/air)
-  - Intensity ranges automatically adapt for DICOM (uint16) vs standard images (uint8)
+  - Intensity range highlighting on slice preview when visualized
 - **Slice preview:**
   - Large preview with slice navigation
   - Slice selector spinbox and slider for quick navigation
+  - Automatic loading when directory is selected
   - Pixels colored according to assigned bins
+  - Grayscale display when no bins defined
+  - Intensity range highlighting when visualized
   - Real-time updates when bin parameters change
+- Automatic histogram and heatmap computation when directory is selected
 - Automatic optimal bin detection from intensity distribution (3-12 bins based on data)
 - Fallback to 6 uniform bins if auto-detection unavailable
 - Per-bin 3D mesh generation
 - Supports multiple output meshes per dataset
 
+![Meshing Tools](./images/meshing_tools.png)
+*Meshing interface with histogram visualization, intensity bin management, and slice preview tools*
+
 ![Meshing Example](./images/meshing_example.png)
-*Meshing interface showing intensity histogram analysis and slice preview with bin-colored pixels*
+*Meshing example showing intensity histogram analysis and slice preview with bin-colored pixels*
 
 ### Export
 - **Format support:**
@@ -139,16 +154,24 @@ The project is designed to be:
 ### GUI
 - Built with PySide6
 - Fully threaded execution (no UI freezing)
+- **Patient Info Display:**
+  - Patient Info box showing DICOM metadata (patient name, ID, birth date, sex, study info)
+  - Automatically updates when DICOM files are loaded
+  - Positioned at top right with logo
+  - Two-column layout for compact display
 - **Enhanced progress dialogs:**
   - Phase-aware progress with per-phase counters
   - "Complete" indicators for finished phases
   - Independent timer (elapsed/remaining time)
   - Progress bar resets for each phase
-  - Single unified progress dialog for volume loading
-  - Relevant phase information (Loading slices, Computing intensity range, etc.)
+  - Single unified progress dialog for volume loading and histogram computation
+  - Relevant phase information (Loading slices, Building volume, Computing histograms, etc.)
 - **Improved Tab Visibility:**
   - Larger, bolder tabs for better visibility
   - Clear separation between preprocessing and meshing steps
+- **Application Branding:**
+  - Application icon (up to 1024px) for taskbar and window title
+  - Logo displayed in top right corner (140px height)
 - Default directory linking (preprocessing output → meshing input)
 - Responsive UI with proper event processing during long operations
 
@@ -262,6 +285,12 @@ Processed slices are written to the selected output directory. The output direct
      - Intensity on horizontal axis, Slice Number on vertical axis
      - Vertical bin boundary lines aligned with intensity
 4. **Manage intensity bins:**
+   - **Auto-bin system:** Use the Auto-bin section to automatically generate bins
+     - Set intensity range (min/max) - adapts to DICOM (uint16) vs standard (uint8) images
+     - Set number of bins and uniformity parameter (0-1)
+     - Click "Visualize" to show/hide intensity range lines on graphs
+     - Drag range lines on histogram and heatmap for real-time adjustment
+     - Click "Apply" to generate bins automatically
    - Optimal bins are automatically detected from intensity distribution (3-12 bins)
    - Add/delete bins as needed (use delete button in each row)
    - Adjust bin min/max values (integers, minimum 1)
@@ -272,7 +301,10 @@ Processed slices are written to the selected output directory. The output direct
    - Intensity ranges automatically adapt for DICOM (uint16) vs standard images (uint8)
 5. **Preview slices:**
    - Navigate through slices using the slice selector or slider
+   - Preview automatically loads when directory is selected
    - Preview shows pixels colored according to their assigned bins
+   - Grayscale display when no bins are defined
+   - Intensity range highlighting when visualized
    - Real-time updates when bin parameters change
 6. **Configure mesh processing options (optional):**
    - Enable/disable component filtering (removes small disconnected components)

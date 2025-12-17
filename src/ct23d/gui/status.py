@@ -94,10 +94,11 @@ class StatusController(QObject):
         # Track the current maximum (total steps) for the progress bar.
         state = {"max": 0, "current_phase": "starting", "phase_current": 0, "phase_total": 0, "phase_start_time": None}
         
-        # Determine phase names based on title (different for preprocessing vs meshing vs file size)
+        # Determine phase names based on title (different for preprocessing vs meshing vs file size vs loading volume)
         title_lower = (title or "").lower()
         is_meshing = "meshes" in title_lower
         is_file_size = "file size" in title_lower or "calculating" in title_lower
+        is_loading_volume = "loading volume" in title_lower or "loading image" in title_lower
         
         if is_file_size:
             # File size calculation: simple single phase
@@ -111,6 +112,14 @@ class StatusController(QObject):
                 "Building masks": "Building masks",
                 "Extracting meshes": "Extracting meshes",
                 "Saving files": "Saving files"
+            }
+        elif is_loading_volume:
+            # Loading volume for meshing
+            all_phases = ["Loading image slices", "Building volume", "Computing histograms"]
+            phase_names = {
+                "Loading image slices": "Loading image slices",
+                "Building volume": "Building volume",
+                "Computing histograms": "Computing histograms"
             }
         else:
             all_phases = ["loading", "processing", "saving"]
@@ -140,7 +149,13 @@ class StatusController(QObject):
             if worker in self._active_workers:
                 self._active_workers.remove(worker)
             # Ensure the thread has fully stopped before Qt destroys it.
-            worker.wait()
+            # Check if worker is still alive before calling wait() to avoid RuntimeError
+            try:
+                if worker.isRunning():
+                    worker.wait(1000)  # Wait up to 1 second
+            except RuntimeError:
+                # Worker object already deleted, ignore
+                pass
 
         def format_time(seconds: float) -> str:
             """Format seconds as MM:SS or HH:MM:SS."""
@@ -199,15 +214,18 @@ class StatusController(QObject):
         
         def on_phase_progress(phase: str, current: int, phase_total: int, overall_total: int) -> None:
             """Handle phase-aware progress updates."""
+            # Update overall maximum if it changed (should increase as we discover total)
+            if overall_total > 0 and dialog.maximum() != overall_total:
+                dialog.setMaximum(overall_total)
+            
             # Check if we're switching phases
             if state["current_phase"] != phase:
-                # Reset progress bar for new phase
+                # New phase starting
                 state["current_phase"] = phase
                 state["phase_current"] = 0
                 state["phase_total"] = phase_total
                 state["phase_start_time"] = time.time()
-                dialog.setValue(0)
-                dialog.setMaximum(phase_total)
+                # Don't reset progress bar value - keep overall progress
             
             # Update phase progress
             state["phase_current"] = current
@@ -217,8 +235,27 @@ class StatusController(QObject):
             if current >= phase_total and phase_total > 0:
                 completed_phases[phase] = True
             
-            # Update progress bar
-            dialog.setValue(current)
+            # Update progress bar with overall progress
+            # For phase-aware progress, use the overall_total directly (worker calculates it)
+            # But we need to calculate it ourselves: completed phases progress + current phase progress
+            # Since we're tracking phases, calculate based on overall_total structure
+            # The worker emits current as progress within the phase, and overall_total as total across all
+            # For simplicity, track completed progress and add current phase progress
+            # But for now, use the overall_total calculation from worker signals
+            # If overall_total matches phase_total, we're in the first phase, so use current directly
+            # Otherwise, calculate: previous phases progress + current phase progress
+            if overall_total > phase_total:
+                # Multi-phase: calculate overall progress
+                # Estimate: (overall_total - phase_total) represents completed phases
+                # Add current phase progress
+                # Actually, the worker should be emitting overall progress correctly in the progress signal
+                # For phase_progress, we'll calculate based on phase completion
+                # Simple approach: use a calculated value based on completed phases
+                completed_progress = overall_total - phase_total  # Previous phases
+                dialog.setValue(completed_progress + current)
+            else:
+                # Single phase or first phase
+                dialog.setValue(current)
             
             # Update display (timer will also update it, but this ensures immediate update)
             update_timer_display()
@@ -277,9 +314,28 @@ class StatusController(QObject):
                 QApplication.processEvents()
                 
                 # Call on_success callback while dialog is still visible
+                # Pass dialog and progress updater to callback if it accepts them
                 if on_success is not None:
                     try:
-                        on_success(result)
+                        import inspect
+                        sig = inspect.signature(on_success)
+                        params = list(sig.parameters.keys())
+                        # If callback accepts dialog and progress updater, pass them
+                        if len(params) >= 3:
+                            # Has result, progress_dialog, and progress_updater parameters
+                            on_success(result, dialog, on_phase_progress)
+                        elif len(params) >= 1:
+                            # Has at least result parameter
+                            on_success(result)
+                        else:
+                            # No parameters
+                            on_success()
+                    except Exception:
+                        # Fallback: just call with result if signature detection fails
+                        try:
+                            on_success(result)
+                        except Exception:
+                            pass
                     finally:
                         # Hide dialog after on_success completes
                         dialog.hide()

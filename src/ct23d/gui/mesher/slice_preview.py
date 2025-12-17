@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QSpinBox, QSizePolicy, QSlider
@@ -70,6 +70,7 @@ class SlicePreviewWidget(QFrame):
         self._volume: Optional[np.ndarray] = None
         self._bins: List[IntensityBin] = []
         self._slice_index: int = 0
+        self._intensity_range: Optional[Tuple[int, int]] = None  # (min, max) for highlighting
     
     def set_volume(self, volume: np.ndarray) -> None:
         """
@@ -133,6 +134,23 @@ class SlicePreviewWidget(QFrame):
         self._bins = bins
         self._update_preview()
     
+    def set_intensity_range(self, min_val: Optional[int], max_val: Optional[int]) -> None:
+        """
+        Set the intensity range to highlight in the preview (for visualization).
+        
+        Parameters
+        ----------
+        min_val : Optional[int]
+            Minimum intensity value to highlight
+        max_val : Optional[int]
+            Maximum intensity value to highlight
+        """
+        if min_val is not None and max_val is not None:
+            self._intensity_range = (min_val, max_val)
+        else:
+            self._intensity_range = None
+        self._update_preview()
+    
     def resizeEvent(self, event) -> None:
         """Handle widget resize to update preview scaling."""
         super().resizeEvent(event)
@@ -143,10 +161,14 @@ class SlicePreviewWidget(QFrame):
         """Update the preview image with bin colors."""
         if self._volume is None:
             self._image_label.clear()
+            self._image_label.setText("No image loaded\nSelect an input folder")
+            self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             return
         
         if self._volume.shape[0] == 0:
             self._image_label.clear()
+            self._image_label.setText("No image loaded\nSelect an input folder")
+            self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             return
         
         # Get the current slice
@@ -163,29 +185,62 @@ class SlicePreviewWidget(QFrame):
         height, width = grayscale.shape
         colored_preview = np.zeros((height, width, 3), dtype=np.uint8)
         
-        # Create a mask for each bin and apply colors
-        for bin_obj in self._bins:
-            if not bin_obj.enabled:
-                continue
+        # If no bins are set, display grayscale image
+        if not self._bins or len(self._bins) == 0:
+            # Normalize grayscale to 0-255 range
+            if grayscale.max() > grayscale.min():
+                normalized = ((grayscale - grayscale.min()) / (grayscale.max() - grayscale.min()) * 255).astype(np.uint8)
+            else:
+                normalized = grayscale.astype(np.uint8)
+            # Convert to RGB (grayscale)
+            colored_preview[:, :, 0] = normalized
+            colored_preview[:, :, 1] = normalized
+            colored_preview[:, :, 2] = normalized
             
-            # Create mask for pixels in this bin's intensity range
-            mask = (grayscale >= bin_obj.low) & (grayscale < bin_obj.high)
-            
-            if np.any(mask):
-                # Get color for this bin
-                if bin_obj.color is not None:
-                    r, g, b = bin_obj.color
-                    color = (int(r * 255), int(g * 255), int(b * 255))
-                else:
-                    # Default gray if no color set
-                    color = (128, 128, 128)
+            # If intensity range is set, highlight pixels in that range
+            if self._intensity_range is not None:
+                range_min, range_max = self._intensity_range
+                # Create mask for pixels in the intensity range
+                range_mask = (grayscale >= range_min) & (grayscale <= range_max)
+                if np.any(range_mask):
+                    # Highlight: overlay with semi-transparent yellow/orange
+                    # Keep original grayscale but tint with yellow
+                    highlighted_r = np.where(range_mask, 
+                        np.clip(normalized.astype(np.float32) * 0.6 + 200 * 0.4, 0, 255).astype(np.uint8),
+                        colored_preview[:, :, 0])
+                    highlighted_g = np.where(range_mask,
+                        np.clip(normalized.astype(np.float32) * 0.6 + 200 * 0.4, 0, 255).astype(np.uint8),
+                        colored_preview[:, :, 1])
+                    highlighted_b = np.where(range_mask,
+                        np.clip(normalized.astype(np.float32) * 0.6 + 50 * 0.4, 0, 255).astype(np.uint8),
+                        colored_preview[:, :, 2])
+                    colored_preview[:, :, 0] = highlighted_r
+                    colored_preview[:, :, 1] = highlighted_g
+                    colored_preview[:, :, 2] = highlighted_b
+        else:
+            # Create a mask for each bin and apply colors
+            for bin_obj in self._bins:
+                if not bin_obj.enabled:
+                    continue
                 
-                # Apply color to masked pixels
-                colored_preview[mask, 0] = color[0]
-                colored_preview[mask, 1] = color[1]
-                colored_preview[mask, 2] = color[2]
-        
-        # Pixels not in any bin remain black (0, 0, 0)
+                # Create mask for pixels in this bin's intensity range
+                mask = (grayscale >= bin_obj.low) & (grayscale < bin_obj.high)
+                
+                if np.any(mask):
+                    # Get color for this bin
+                    if bin_obj.color is not None:
+                        r, g, b = bin_obj.color
+                        color = (int(r * 255), int(g * 255), int(b * 255))
+                    else:
+                        # Default gray if no color set
+                        color = (128, 128, 128)
+                    
+                    # Apply color to masked pixels
+                    colored_preview[mask, 0] = color[0]
+                    colored_preview[mask, 1] = color[1]
+                    colored_preview[mask, 2] = color[2]
+            
+            # Pixels not in any bin remain black (0, 0, 0)
         
         # Convert to QImage and display
         qimage = QImage(

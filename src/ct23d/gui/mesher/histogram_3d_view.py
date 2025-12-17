@@ -47,9 +47,26 @@ class Histogram3DView(QFrame):
         self._bin_lines: List[pg.InfiniteLine] = []
         self._bin_labels: List[pg.TextItem] = []
         self.bin_boundary_changed: Optional[Callable[[int, str, float], None]] = None
+        self.range_line_changed: Optional[Callable[[str, float], None]] = None
+        self._range_min_line: Optional[pg.InfiniteLine] = None
+        self._range_max_line: Optional[pg.InfiniteLine] = None
+        self._range_min_label: Optional[pg.TextItem] = None
+        self._range_max_label: Optional[pg.TextItem] = None
 
     def clear(self) -> None:
         """Clear the 3D histogram plot."""
+        if self._range_min_line is not None:
+            self._plot.removeItem(self._range_min_line)
+            self._range_min_line = None
+        if self._range_max_line is not None:
+            self._plot.removeItem(self._range_max_line)
+            self._range_max_line = None
+        if self._range_min_label is not None:
+            self._plot.removeItem(self._range_min_label)
+            self._range_min_label = None
+        if self._range_max_label is not None:
+            self._plot.removeItem(self._range_max_label)
+            self._range_max_label = None
         self._plot.clear()
         self._intensity_data = None
         self._slice_data = None
@@ -62,6 +79,7 @@ class Histogram3DView(QFrame):
         volume: np.ndarray,
         n_bins: int = 256,
         value_range: Optional[tuple[float, float]] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         """
         Compute and display a 3D histogram from a volume.
@@ -79,6 +97,9 @@ class Histogram3DView(QFrame):
             Number of intensity bins
         value_range : Optional[tuple[float, float]]
             Intensity range (vmin, vmax). If None, computed from data.
+        progress_callback : Optional[Callable[[int, int], None]]
+            Optional callback function(current, total) called during slice processing
+            to report progress. Called once per slice processed.
         """
         if volume is None or volume.size == 0:
             self.clear()
@@ -121,9 +142,9 @@ class Histogram3DView(QFrame):
         intensity_bin_edges[-1] = vmax + 1e-6
         intensity_bin_centers = (intensity_bin_edges[:-1] + intensity_bin_edges[1:]) / 2
         
-        # Process slices - only process events occasionally to avoid slowing down computation
+        # Process slices - process events more frequently to keep UI responsive
         from PySide6.QtWidgets import QApplication
-        batch_size = max(50, num_slices // 10)  # Update every 10% or every 50 slices (less frequent)
+        batch_size = max(10, num_slices // 20)  # Update every 5% or every 10 slices (more frequent)
         
         for z_idx in range(num_slices):
             slice_data = grayscale[z_idx]
@@ -136,7 +157,11 @@ class Histogram3DView(QFrame):
             hist, _ = np.histogram(slice_data_clipped, bins=intensity_bin_edges)
             slice_histograms.append(hist)
             
-            # Process events less frequently to avoid slowing down computation
+            # Update progress callback if provided
+            if progress_callback is not None:
+                progress_callback(z_idx + 1, num_slices)
+            
+            # Process events more frequently to keep UI responsive
             if (z_idx + 1) % batch_size == 0:
                 QApplication.processEvents()
         
@@ -152,11 +177,19 @@ class Histogram3DView(QFrame):
         self._bin_labels.clear()
         
         # Create 2D heatmap where:
-        # - Rows (Y axis) = Slice numbers (vertical)
-        # - Cols (X axis) = Intensity bins (horizontal)
+        # - X axis (horizontal) = Intensity bins
+        # - Y axis (vertical) = Slice numbers
         # - Color = Pixel count (Z axis)
-        # Keep original orientation: rows = slices, cols = intensity bins
-        img_data = histograms_2d  # (num_slices, n_bins) - rows are slices, cols are intensity bins
+        # PyQtGraph ImageItem displays data as (rows, cols) where:
+        #   - rows = vertical (Y) axis = slice numbers
+        #   - cols = horizontal (X) axis = intensity bins
+        # Our data is (num_slices, n_bins) which is (Y, X), so we need to transpose
+        # to get (intensity bins, slice numbers) = (X, Y), then set rect accordingly
+        # Actually, wait - let's check orientation. ImageItem maps [row, col] where row is Y (vertical)
+        # and col is X (horizontal). So (num_slices, n_bins) = (rows, cols) = (Y, X) is correct.
+        # But if axes appear inverted, we need to transpose to (n_bins, num_slices) = (X, Y)
+        # and adjust the rect mapping
+        img_data = histograms_2d.T  # Transpose: (n_bins, num_slices) - rows (Y) are intensity, cols (X) are slices
         
         # Normalize for better visualization (log scale to handle large variations)
         img_data_log = np.log1p(img_data)  # log(1+x) to handle zeros
@@ -165,40 +198,46 @@ class Histogram3DView(QFrame):
         img_item = pg.ImageItem(img_data_log)
         self._plot.addItem(img_item)
         
-        # Set up axes (swapped: intensity horizontal, slice number vertical)
-        self._plot.setLabel("bottom", "Intensity")
-        self._plot.setLabel("left", "Slice Number")
+        # Set up axes (will be swapped after transpose)
+        # Initial labels, will be corrected after rect setup
+        self._plot.setLabel("bottom", "Slice Number")
+        self._plot.setLabel("left", "Intensity")
         
         # Set axis ranges - image item uses (x, y, width, height)
-        # For ImageItem, the rect maps the image rectangle to data coordinates
-        # Image has shape (num_slices, n_bins) = (rows, cols)
-        # We want: column j (0 to n_bins-1) maps to intensity bin j (horizontal/X axis)
-        # And: row i (0 to num_slices-1) maps to slice i (vertical/Y axis)
-        
-        # ImageItem maps pixel boundaries, not centers
-        # Column 0 (intensity) spans from x = vmin to x = vmin + bin_width
-        # Column n_bins-1 spans from x = vmax - bin_width to x = vmax
-        # Row 0 (slice) spans from y = -0.5 to y = 0.5 (center at 0)
-        # Row num_slices-1 spans from y = num_slices-1.5 to y = num_slices-0.5
+        # After transpose, image has shape (n_bins, num_slices) = (rows, cols)
+        # We want: X axis (horizontal) = Intensity bins, Y axis (vertical) = Slice numbers
+        # So: columns (X) should map to slices, rows (Y) should map to intensity
+        # But ImageItem maps [row, col] to [y, x] where row=Y (vertical) and col=X (horizontal)
+        # With transposed data (n_bins, num_slices):
+        #   - rows (Y/vertical) = intensity bins (0 to n_bins-1)
+        #   - cols (X/horizontal) = slice numbers (0 to num_slices-1)
+        # So we need to map:
+        #   - X axis (horizontal/cols): 0 to num_slices-1 maps to slice 0 to num_slices-1
+        #   - Y axis (vertical/rows): 0 to n_bins-1 maps to intensity vmin to vmax
         
         # Calculate bin width for intensity
         intensity_bin_width = (vmax - vmin) / n_bins if n_bins > 0 else 1.0
         
         # Set rect: (x_min, y_min, width, height)
-        # x_min = vmin so column 0 (lowest intensity) left edge is at x=vmin
-        # y_min = -0.5 so row 0 (first slice) bottom edge is at y=-0.5
-        # width = vmax - vmin so column n_bins-1 right edge is at x=vmax
-        # height = num_slices so row num_slices-1 top edge is at y=num_slices-0.5
+        # x_min = -0.5 so column 0 (first slice) left edge is at x=-0.5
+        # y_min = vmin so row 0 (lowest intensity) bottom edge is at y=vmin
+        # width = num_slices so column num_slices-1 right edge is at x=num_slices-0.5
+        # height = vmax - vmin so row n_bins-1 top edge is at y=vmax
         img_item.setRect(QtCore.QRectF(
-            vmin, -0.5,  # x, y position (left edge of intensity, bottom edge of slice 0)
-            vmax - vmin, num_slices  # width, height (intensity span, slice span)
+            -0.5, vmin,  # x, y position (left edge of slice 0, bottom edge of intensity vmin)
+            num_slices, vmax - vmin  # width, height (slice span, intensity span)
         ))
         
         # Auto-zoom to fit the data
-        # X range: vmin to vmax (full intensity range) with small padding
-        # Y range: -0.5 to num_slices-0.5 (so slice centers are at integers)
-        self._plot.setXRange(vmin, vmax, padding=0.02)
-        self._plot.setYRange(-0.5, max(num_slices - 0.5, 0.5), padding=0.02)
+        # X range: -0.5 to num_slices-0.5 (so slice centers are at integers)
+        # Y range: vmin to vmax (full intensity range) with small padding
+        self._plot.setXRange(-0.5, max(num_slices - 0.5, 0.5), padding=0.02)
+        self._plot.setYRange(vmin, vmax, padding=0.02)
+        
+        # User wants: X axis = Intensity, Y axis = Slice Number (swapped labels, not graph)
+        # So swap the labels to match what user expects to see
+        self._plot.setLabel("bottom", "Intensity")
+        self._plot.setLabel("left", "Slice Number")
         
         # Add color bar to show pixel count scale
         # Note: PyQtGraph's colorbar might need different API
@@ -298,13 +337,13 @@ class Histogram3DView(QFrame):
             bin_table_row = bin_obj.index if hasattr(bin_obj, 'index') and bin_obj.index is not None else i
             
             # Add low boundary line if it doesn't exist
-            # Bin boundaries should be VERTICAL (angle=90) since intensity is on X-axis (horizontal)
+            # Bin boundaries should be HORIZONTAL (angle=0) since intensity is on Y-axis (vertical) after transpose
             if (bin_table_row, 'low') not in existing_line_keys:
                 # Ensure position is within bounds
                 pos = max(self._vmin, min(bin_obj.low, self._vmax))
                 line_low = pg.InfiniteLine(
                     pos=pos,
-                    angle=90,  # Vertical line (across intensity axis, which is now horizontal)
+                    angle=0,  # Horizontal line (across intensity axis, which is now vertical)
                     pen=pg.mkPen(color=color, width=3, style=QtCore.Qt.SolidLine),  # Thicker, more visible
                     movable=True,
                     bounds=[self._vmin, self._vmax]
@@ -324,7 +363,7 @@ class Histogram3DView(QFrame):
                 pos = max(self._vmin, min(bin_obj.high, self._vmax))
                 line_high = pg.InfiniteLine(
                     pos=pos,
-                    angle=90,  # Vertical line (across intensity axis, which is now horizontal)
+                    angle=0,  # Horizontal line (across intensity axis, which is now vertical)
                     pen=pg.mkPen(color=color, width=3, style=QtCore.Qt.SolidLine),  # Thicker, more visible
                     movable=True,
                     bounds=[self._vmin, self._vmax]
@@ -338,8 +377,8 @@ class Histogram3DView(QFrame):
                 self._plot.addItem(line_high)
                 self._bin_lines.append(line_high)
             
-            # Add label on the left side of the plot (Y-axis side, since slice number is vertical)
-            # Position at the middle of the bin's intensity range (X position) and at slice 0 (Y position)
+            # Add label on the left side of the plot (Y-axis side, since intensity is now vertical)
+            # Position at the middle of the bin's intensity range (Y position) and at slice 0 (X position)
             bin_id = bin_obj.index if hasattr(bin_obj, 'index') and bin_obj.index is not None else i
             label_text = f"Bin {bin_id + 1}"
             mid_intensity = (bin_obj.low + bin_obj.high) / 2
@@ -350,8 +389,8 @@ class Histogram3DView(QFrame):
                 border=pg.mkPen(color=color, width=1),
                 fill=pg.mkBrush((0, 0, 0, 200))
             )
-            # Position: X = mid_intensity (intensity position), Y = -0.5 (left edge, slice 0)
-            label.setPos(mid_intensity, -0.5)
+            # Position: X = -0.5 (left edge, slice 0), Y = mid_intensity (intensity position)
+            label.setPos(-0.5, mid_intensity)
             self._plot.addItem(label)
             self._bin_labels.append(label)
     
@@ -376,3 +415,114 @@ class Histogram3DView(QFrame):
     def set_bin_boundary_callback(self, callback) -> None:
         """Set callback for when bin boundaries are moved."""
         self.bin_boundary_changed = callback
+    
+    def set_range_line_callback(self, callback) -> None:
+        """Set callback for when range lines (min/max) are moved."""
+        self.range_line_changed = callback
+    
+    def update_range_lines(self, min_val: Optional[int], max_val: Optional[int]) -> None:
+        """Update the range lines (min/max) displayed on the histogram."""
+        # Remove existing range lines and labels if any
+        if self._range_min_line is not None:
+            self._plot.removeItem(self._range_min_line)
+            self._range_min_line = None
+        if self._range_max_line is not None:
+            self._plot.removeItem(self._range_max_line)
+            self._range_max_line = None
+        if self._range_min_label is not None:
+            self._plot.removeItem(self._range_min_label)
+            self._range_min_label = None
+        if self._range_max_label is not None:
+            self._plot.removeItem(self._range_max_label)
+            self._range_max_label = None
+        
+        # Only create lines if values are provided
+        if min_val is None or max_val is None or self._vmax <= self._vmin:
+            return
+        
+        # Create min range line (vertical, dashed, distinct color)
+        # User wants vertical lines for intensity range (since labels show intensity on X axis)
+        # But intensity is actually on Y axis in the data, so we need vertical lines (angle=90) 
+        # positioned at the intensity value (Y position)
+        self._range_min_line = pg.InfiniteLine(
+            pos=float(min_val),
+            angle=90,  # Vertical line (since intensity is on Y axis in the plot)
+            pen=pg.mkPen(color='cyan', width=2, style=QtCore.Qt.DashLine),
+            movable=True,
+            bounds=[self._vmin, self._vmax]
+        )
+        self._range_min_line.setZValue(20)  # Above bin lines
+        self._range_min_line.line_type = 'min'
+        self._range_min_line.sigPositionChanged.connect(lambda line: self._on_range_line_moved(line))
+        self._plot.addItem(self._range_min_line)
+        
+        # Create min label at top of plot (centered on X axis)
+        if self._plot.getViewBox() is not None:
+            y_range = self._plot.getViewBox().viewRange()[1]
+            y_max = y_range[1]
+            x_range = self._plot.getViewBox().viewRange()[0]
+            x_center = (x_range[0] + x_range[1]) / 2
+        else:
+            y_max = self._vmax
+            x_center = float(self._num_slices) / 2 if self._num_slices > 0 else 50.0
+        self._range_min_label = pg.TextItem(
+            text=f"Min: {min_val}",
+            color='cyan',
+            anchor=(0.5, 0),  # Center-aligned, top-anchored
+            border=pg.mkPen(color='cyan', width=1),
+            fill=pg.mkBrush((0, 0, 0, 200))
+        )
+        self._range_min_label.setPos(x_center, y_max * 0.96)  # Top of plot, centered horizontally
+        self._plot.addItem(self._range_min_label)
+        
+        # Create max range line (vertical, dashed, distinct color)
+        self._range_max_line = pg.InfiniteLine(
+            pos=float(max_val),
+            angle=90,  # Vertical line (since intensity is on Y axis in the plot)
+            pen=pg.mkPen(color='magenta', width=2, style=QtCore.Qt.DashLine),
+            movable=True,
+            bounds=[self._vmin, self._vmax]
+        )
+        self._range_max_line.setZValue(20)  # Above bin lines
+        self._range_max_line.line_type = 'max'
+        self._range_max_line.sigPositionChanged.connect(lambda line: self._on_range_line_moved(line))
+        self._plot.addItem(self._range_max_line)
+        
+        # Create max label at top of plot (higher position to avoid overlap with min)
+        self._range_max_label = pg.TextItem(
+            text=f"Max: {max_val}",
+            color='magenta',
+            anchor=(0.5, 0),  # Center-aligned, top-anchored
+            border=pg.mkPen(color='magenta', width=1),
+            fill=pg.mkBrush((0, 0, 0, 200))
+        )
+        self._range_max_label.setPos(x_center, y_max * 0.98)  # Higher position at top of plot
+        self._plot.addItem(self._range_max_label)
+    
+    def _on_range_line_moved(self, line: pg.InfiniteLine) -> None:
+        """Called when a range line is dragged."""
+        new_pos = int(round(line.value()))
+        line_type = getattr(line, 'line_type', None)
+        
+        # Ensure within bounds
+        if new_pos < self._vmin:
+            new_pos = int(round(self._vmin))
+            line.blockSignals(True)
+            line.setValue(float(new_pos))
+            line.blockSignals(False)
+        elif new_pos > self._vmax:
+            new_pos = int(round(self._vmax))
+            line.blockSignals(True)
+            line.setValue(float(new_pos))
+            line.blockSignals(False)
+        
+        # Call callback to update controls
+        if self.range_line_changed is not None and line_type is not None:
+            self.range_line_changed(line_type, float(new_pos))
+        
+        # Update label position (intensity is on Y axis, so line moves vertically)
+        # Labels are positioned at top of plot, so we only update the text, not the position
+        if line_type == 'min' and self._range_min_label is not None:
+            self._range_min_label.setText(f"Min: {new_pos}")
+        elif line_type == 'max' and self._range_max_label is not None:
+            self._range_max_label.setText(f"Max: {new_pos}")
