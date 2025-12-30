@@ -1,6 +1,6 @@
 # Release v0.5.0 - Canonical Volume Persistence & 3D Processing
 
-## 🎉 Major Features
+## Major Features
 
 ### Canonical Volume Persistence
 - **NRRD Format Export**: Processed volumes are now exported as standardized NRRD files with full metadata preservation
@@ -14,14 +14,14 @@
 - **Vertex Coloring**: Meshes display with vertex colors mapped from intensity bins, enabling multi-colored visualization of different tissue types in a single mesh
 - **Mesh Controls**: Opacity slider with manual input, smooth shading, edge display, and camera controls
 
-## ✨ Improvements
+## Improvements
 
 - **Unified Loading Workflow**: Single progress dialog for combined volume loading and mesh generation
 - **Enhanced Progress Tracking**: Phase-aware progress dialogs for NRRD export and mesh generation operations
 - **Improved UI Responsiveness**: Background thread processing prevents UI freezing during volume operations
 - **Bin Color Export**: Intensity bin colors are now properly exported to provenance metadata
 
-## 🔧 Technical Details
+## Technical Details
 
 - Added `pyvista` and `pyvistaqt` dependencies for 3D visualization
 - Canonical volumes stored with `int16` data type by default (with `float32` fallback)
@@ -29,7 +29,7 @@
 - Vertex color sampling from volume intensities at mesh vertices
 - Worker lifecycle management to prevent thread destruction errors
 
-## 📦 Files Changed
+## Files Changed
 
 - New: `src/ct23d/gui/processing3d/` - 3D Processing tab implementation
 - New: `scripts/view_nrrd.py` - Standalone NRRD file viewer utility
@@ -37,7 +37,7 @@
 - Updated: `src/ct23d/gui/mesher/wizard.py` - Export workflow refactored for NRRD-only export
 - Updated: `src/ct23d/gui/status.py` - Enhanced progress dialog phase tracking
 
-## 🚀 Upgrade Notes
+## Upgrade Notes
 
 This release introduces the canonical volume format as the primary persistence mechanism. Processed volumes should now be exported as NRRD files for use in the 3D Processing tab.
 
