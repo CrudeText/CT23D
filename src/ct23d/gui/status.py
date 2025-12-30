@@ -94,11 +94,15 @@ class StatusController(QObject):
         # Track the current maximum (total steps) for the progress bar.
         state = {"max": 0, "current_phase": "starting", "phase_current": 0, "phase_total": 0, "phase_start_time": None}
         
-        # Determine phase names based on title (different for preprocessing vs meshing vs file size vs loading volume)
+        # Determine phase names based on title (different for preprocessing vs meshing vs file size vs loading volume vs NRRD export)
         title_lower = (title or "").lower()
         is_meshing = "meshes" in title_lower
+        is_mesh_generation = "generating mesh" in title_lower or "mesh generation" in title_lower
         is_file_size = "file size" in title_lower or "calculating" in title_lower
-        is_loading_volume = "loading volume" in title_lower or "loading image" in title_lower
+        is_loading_with_mesh = "loading canonical volume and generating mesh" in title_lower
+        is_loading_nrrd = ("loading canonical volume" in title_lower or ("loading" in title_lower and "nrrd" in title_lower)) and not is_loading_with_mesh
+        is_loading_volume = ("loading volume" in title_lower or "loading image" in title_lower) and not is_loading_nrrd and not is_loading_with_mesh
+        is_nrrd_export = "exporting" in title_lower and ("nrrd" in title_lower or "volume" in title_lower)
         
         if is_file_size:
             # File size calculation: simple single phase
@@ -106,12 +110,43 @@ class StatusController(QObject):
             phase_names = {
                 "calculating": "Calculating file size"
             }
-        elif is_meshing:
-            all_phases = ["Building masks", "Extracting meshes", "Saving files"]
+        elif is_nrrd_export:
+            # NRRD volume export
+            all_phases = ["Exporting NRRD", "Exporting JSON"]
             phase_names = {
+                "Exporting NRRD": "Exporting NRRD",
+                "Exporting JSON": "Exporting JSON"
+            }
+        elif is_meshing:
+            all_phases = ["Calculating file size", "Building masks", "Extracting meshes", "Saving files"]
+            phase_names = {
+                "Calculating file size": "Calculating file size",
                 "Building masks": "Building masks",
                 "Extracting meshes": "Extracting meshes",
                 "Saving files": "Saving files"
+            }
+        elif is_loading_with_mesh:
+            # Loading NRRD and generating mesh in Tab 3 (combined operation)
+            all_phases = ["Reading NRRD file", "Creating mask", "Extracting mesh", "Scaling mesh"]
+            phase_names = {
+                "Reading NRRD file": "Reading NRRD file",
+                "Creating mask": "Creating mask",
+                "Extracting mesh": "Extracting mesh",
+                "Scaling mesh": "Scaling mesh"
+            }
+        elif is_loading_nrrd:
+            # Loading NRRD canonical volume in Tab 3 (simple operation, single phase)
+            all_phases = ["Reading NRRD file"]
+            phase_names = {
+                "Reading NRRD file": "Reading NRRD file"
+            }
+        elif is_mesh_generation:
+            # Mesh generation in Tab 3
+            all_phases = ["Creating mask", "Extracting mesh", "Scaling mesh"]
+            phase_names = {
+                "Creating mask": "Creating mask",
+                "Extracting mesh": "Extracting mesh",
+                "Scaling mesh": "Scaling mesh"
             }
         elif is_loading_volume:
             # Loading volume for meshing
@@ -133,6 +168,10 @@ class StatusController(QObject):
         completed_phases: dict[str, bool] = {}
         for p in all_phases:
             completed_phases[p] = False
+        
+        # Track file sizes for export operations
+        estimated_file_size: Optional[int] = None
+        actual_bytes_written: int = 0
         
         # Track start time for elapsed time calculation
         start_time = time.time()
@@ -192,9 +231,39 @@ class StatusController(QObject):
                 for p in all_phases:
                     p_name = phase_names.get(p, p.capitalize())
                     if completed_phases.get(p, False):
-                        status_lines.append(f"✓ {p_name}: Complete")
+                        # Show file size info for completed "Saving files" phase
+                        if p == "Saving files" and estimated_file_size and actual_bytes_written > 0:
+                            try:
+                                from ct23d.core.export import format_file_size
+                                status_lines.append(f"✓ {p_name}: Complete (estimated: {format_file_size(estimated_file_size)}, actual: {format_file_size(actual_bytes_written)})")
+                            except Exception:
+                                status_lines.append(f"✓ {p_name}: Complete")
+                        # Show estimated size for completed "Calculating file size" phase
+                        elif p == "Calculating file size" and estimated_file_size:
+                            try:
+                                from ct23d.core.export import format_file_size
+                                status_lines.append(f"✓ {p_name}: Complete ({format_file_size(estimated_file_size)} estimated)")
+                            except Exception:
+                                status_lines.append(f"✓ {p_name}: Complete")
+                        else:
+                            status_lines.append(f"✓ {p_name}: Complete")
                     elif p == phase and phase_total > 0:
-                        status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+                        # Show current progress with file size info if available
+                        if p == "Saving files" and estimated_file_size:
+                            try:
+                                from ct23d.core.export import format_file_size
+                                status_lines.append(f"→ {p_name}: {format_file_size(actual_bytes_written)} / {format_file_size(estimated_file_size)}")
+                            except Exception:
+                                status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+                        # Show file size info for NRRD/JSON export phases
+                        elif p in ("Exporting NRRD", "Exporting JSON") and phase_total > 0:
+                            try:
+                                from ct23d.core.export import format_file_size
+                                status_lines.append(f"→ {p_name}: {format_file_size(current)} / {format_file_size(phase_total)}")
+                            except Exception:
+                                status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+                        else:
+                            status_lines.append(f"→ {p_name}: {current} / {phase_total}")
                     else:
                         status_lines.append(f"  {p_name}: Pending")
                 
@@ -214,9 +283,27 @@ class StatusController(QObject):
         
         def on_phase_progress(phase: str, current: int, phase_total: int, overall_total: int) -> None:
             """Handle phase-aware progress updates."""
-            # Update overall maximum if it changed (should increase as we discover total)
-            if overall_total > 0 and dialog.maximum() != overall_total:
-                dialog.setMaximum(overall_total)
+            # Process events immediately to keep UI responsive
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            
+            nonlocal estimated_file_size
+            
+            # For "Calculating file size" phase, store the estimated size
+            # The overall_total parameter contains the estimated file size in bytes (when phase is complete)
+            if phase == "Calculating file size" and current >= phase_total and overall_total > 1000:
+                # Only store when phase is complete and overall_total looks like bytes
+                estimated_file_size = overall_total
+            
+            # For "Saving files" phase with estimated size, use bytes-based progress
+            if phase == "Saving files" and estimated_file_size:
+                # Progress is handled by bytes_written signal
+                dialog.setMaximum(estimated_file_size)
+                # Don't update progress bar here - bytes_written signal handles it
+            else:
+                # Update overall maximum if it changed (should increase as we discover total)
+                if overall_total > 0 and dialog.maximum() != overall_total:
+                    dialog.setMaximum(overall_total)
             
             # Check if we're switching phases
             if state["current_phase"] != phase:
@@ -236,26 +323,15 @@ class StatusController(QObject):
                 completed_phases[phase] = True
             
             # Update progress bar with overall progress
-            # For phase-aware progress, use the overall_total directly (worker calculates it)
-            # But we need to calculate it ourselves: completed phases progress + current phase progress
-            # Since we're tracking phases, calculate based on overall_total structure
-            # The worker emits current as progress within the phase, and overall_total as total across all
-            # For simplicity, track completed progress and add current phase progress
-            # But for now, use the overall_total calculation from worker signals
-            # If overall_total matches phase_total, we're in the first phase, so use current directly
-            # Otherwise, calculate: previous phases progress + current phase progress
-            if overall_total > phase_total:
-                # Multi-phase: calculate overall progress
-                # Estimate: (overall_total - phase_total) represents completed phases
-                # Add current phase progress
-                # Actually, the worker should be emitting overall progress correctly in the progress signal
-                # For phase_progress, we'll calculate based on phase completion
-                # Simple approach: use a calculated value based on completed phases
-                completed_progress = overall_total - phase_total  # Previous phases
-                dialog.setValue(completed_progress + current)
-            else:
-                # Single phase or first phase
-                dialog.setValue(current)
+            # For "Saving files" phase, progress is handled by bytes_written signal
+            if phase != "Saving files" or not estimated_file_size:
+                if overall_total > phase_total:
+                    # Multi-phase: calculate overall progress
+                    completed_progress = overall_total - phase_total  # Previous phases
+                    dialog.setValue(completed_progress + current)
+                else:
+                    # Single phase or first phase
+                    dialog.setValue(current)
             
             # Update display (timer will also update it, but this ensures immediate update)
             update_timer_display()
@@ -362,9 +438,22 @@ class StatusController(QObject):
         dialog.canceled.connect(on_cancel)
         worker.progress.connect(on_progress)   # type: ignore[arg-type]
         
-        # Connect phase-aware progress if available (for PreprocessWorker)
+        # Connect phase-aware progress if available (for PreprocessWorker, ExportWorker)
         if hasattr(worker, 'phase_progress'):
             worker.phase_progress.connect(on_phase_progress)  # type: ignore[attr-defined]
+        
+        # Connect bytes_written signal if available (for ExportWorker)
+        if hasattr(worker, 'bytes_written'):
+            def on_bytes_written(bytes_count: int) -> None:
+                nonlocal actual_bytes_written
+                actual_bytes_written = bytes_count
+                # Update progress based on bytes if we have estimated size and we're in saving phase
+                if estimated_file_size and state.get("current_phase") == "Saving files":
+                    dialog.setValue(bytes_count)
+                    dialog.setMaximum(estimated_file_size)
+                    update_timer_display()
+            
+            worker.bytes_written.connect(on_bytes_written)  # type: ignore[attr-defined]
         
         worker.error.connect(on_error)        # type: ignore[arg-type]
         worker.finished.connect(on_finished)  # type: ignore[arg-type]
@@ -377,7 +466,7 @@ class StatusController(QObject):
         # Start background work and show dialog
         # Set initial label based on title (different phases for different tasks)
         if "meshes" in (title or "").lower():
-            initial_text = "  Building masks: Pending\n  Extracting meshes: Pending\n  Saving files: Pending\n\nElapsed: 00:00"
+            initial_text = "  Calculating file size: Pending\n  Building masks: Pending\n  Extracting meshes: Pending\n  Saving files: Pending\n\nElapsed: 00:00"
         else:
             initial_text = "  Loading images: Pending\n  Processing volume: Pending\n  Saving slices: Pending\n\nElapsed: 00:00"
         dialog.setLabelText(initial_text)

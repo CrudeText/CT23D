@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Optional, Tuple
+import time
+import threading
+import os
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -30,13 +33,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 
+from datetime import datetime
 from ct23d.core import images
 from ct23d.core.models import IntensityBin, MeshingConfig
 from ct23d.core import meshing as meshing_core
 from ct23d.core import export as export_core
+from ct23d.core import volume as volmod
+from ct23d.core.volume import CanonicalVolume, save_volume_nrrd, prepare_volume_data_for_canonical
 from ct23d.gui.status import StatusController
 from ct23d.gui.workers import FunctionWorker, WorkerBase
-from PySide6.QtCore import Signal
 from ct23d.gui.mesher.histogram_3d_view import Histogram3DView
 from ct23d.gui.mesher.slice_preview import SlicePreviewWidget
 
@@ -136,7 +141,7 @@ class MesherWizard(QWidget):
         min_max_row.addWidget(self.auto_bin_max_spin)
         self.visualize_range_cb = QCheckBox("Visualize")
         self.visualize_range_cb.setToolTip("Show range lines (min/max) on histogram graphs")
-        self.visualize_range_cb.setChecked(False)
+        self.visualize_range_cb.setChecked(True)  # Default to checked
         self.visualize_range_cb.toggled.connect(self._on_visualize_range_toggled)
         min_max_row.addWidget(self.visualize_range_cb)
         min_max_row.addStretch()
@@ -296,7 +301,7 @@ class MesherWizard(QWidget):
         # Component filtering option
         component_row = QHBoxLayout()
         self.enable_component_filtering_cb = QCheckBox("Enable component filtering")
-        self.enable_component_filtering_cb.setChecked(True)
+        self.enable_component_filtering_cb.setChecked(False)  # Default: off for minimal loss
         self.enable_component_filtering_cb.setToolTip(
             "Remove small isolated regions as noise. "
             "Uncheck to preserve all details (may include noise)."
@@ -334,12 +339,12 @@ class MesherWizard(QWidget):
         self.enable_component_filtering_cb.toggled.connect(
             lambda checked: self.spin_min_component_size.setEnabled(checked)
         )
-        self.spin_min_component_size.setEnabled(True)  # Enabled by default since checkbox is checked
+        self.spin_min_component_size.setEnabled(False)  # Disabled by default since checkbox is unchecked
 
         # Smoothing option
         smoothing_row = QHBoxLayout()
         self.enable_smoothing_cb = QCheckBox("Enable Gaussian smoothing")
-        self.enable_smoothing_cb.setChecked(True)
+        self.enable_smoothing_cb.setChecked(False)  # Default: off for minimal loss
         self.enable_smoothing_cb.setToolTip(
             "Blur edges for smoother surfaces. "
             "WARNING: Can remove small objects and thin connections! "
@@ -378,78 +383,72 @@ class MesherWizard(QWidget):
         self.enable_smoothing_cb.toggled.connect(
             lambda checked: self.spin_smoothing_sigma.setEnabled(checked)
         )
-        self.spin_smoothing_sigma.setEnabled(True)  # Enabled by default since checkbox is checked
+        self.spin_smoothing_sigma.setEnabled(False)  # Disabled by default since checkbox is unchecked
         
         options_row.addWidget(processing_group, stretch=1)
 
-        # Export options group (right side)
-        export_group = QGroupBox("Export Options")
-        export_layout = QVBoxLayout(export_group)
+        # Canonical Volume (NRRD) group (right side) - replaces Export Options
+        canonical_group = QGroupBox("Canonical Volume (NRRD)")
+        canonical_layout = QVBoxLayout(canonical_group)
         
-        # File organization
+        canonical_info = QLabel(
+            "Save the canonical voxel volume as NRRD format. "
+            "This is the ground truth data for medical/ML operations."
+        )
+        canonical_info.setStyleSheet("color: gray; font-style: italic;")
+        canonical_info.setWordWrap(True)
+        canonical_layout.addWidget(canonical_info)
+        
+        canonical_save_row = QHBoxLayout()
+        self.save_canonical_cb = QCheckBox("Save canonical volume")
+        self.save_canonical_cb.setChecked(True)  # Default to enabled
+        self.save_canonical_cb.setToolTip(
+            "Save the volume as NRRD format with provenance metadata. "
+            "This is the recommended output format."
+        )
+        canonical_save_row.addWidget(self.save_canonical_cb)
+        
+        self.canonical_path_label = QLabel("(default: output_volume.nrrd)")
+        self.canonical_path_label.setStyleSheet("color: gray;")
+        canonical_save_row.addWidget(self.canonical_path_label)
+        
+        self.select_canonical_path_btn = QPushButton("Browse...")
+        self.select_canonical_path_btn.setEnabled(False)  # Enabled only when checkbox is checked
+        self.select_canonical_path_btn.clicked.connect(self._on_select_canonical_path)
+        self.save_canonical_cb.toggled.connect(
+            lambda checked: self.select_canonical_path_btn.setEnabled(checked)
+        )
+        canonical_save_row.addWidget(self.select_canonical_path_btn)
+        canonical_save_row.addStretch()
+        canonical_layout.addLayout(canonical_save_row)
+        
+        self._canonical_volume_path: Optional[Path] = None  # User-selected path, None = use default
+        
+        # File organization (for future PLY export in tab 3)
         file_org_row = QHBoxLayout()
         file_org_row.addWidget(QLabel("File organization:"))
         self.export_mode_combo = QComboBox()
         self.export_mode_combo.addItems(["Multiple files (one per bin)", "Single file (all bins combined)"])
-        # File size calculation is now manual only (button click)
+        self.export_mode_combo.setCurrentIndex(1)  # Default to "Single file (all bins combined)"
+        self.export_mode_combo.setToolTip("File organization for future mesh exports (Tab 3)")
         file_org_row.addWidget(self.export_mode_combo)
         file_org_row.addStretch()
-        export_layout.addLayout(file_org_row)
+        canonical_layout.addLayout(file_org_row)
         
-        # Format (must be selected first to determine available options)
-        format_row = QHBoxLayout()
-        format_row.addWidget(QLabel("Format:"))
-        self.format_combo = QComboBox()
-        # PLY and STL are implemented
-        self.format_combo.addItems(["PLY", "STL"])
-        self.format_combo.setToolTip(
-            "PLY: Supports per-vertex colors and opacity\n"
-            "STL: Geometry only (no colors/opacity), widely compatible"
-        )
-        format_row.addWidget(self.format_combo)
-        format_row.addStretch()
-        export_layout.addLayout(format_row)
-        
-        # Format info label (updates based on selected format)
-        self.format_info_label = QLabel("PLY supports colors and opacity")
-        self.format_info_label.setStyleSheet("color: gray; font-style: italic;")
-        export_layout.addWidget(self.format_info_label)
-        
-        # Connect format change to update available options
-        self.format_combo.currentTextChanged.connect(self._on_format_changed)
-        # File size calculation is now manual only (button click)
-        
-        # Options checkboxes
+        # Colors and opacity options (for future PLY export in tab 3)
         export_options_row = QHBoxLayout()
         self.export_colors_cb = QCheckBox("Export with colors")
         self.export_colors_cb.setChecked(True)
-        # File size calculation is now manual only (button click)
+        self.export_colors_cb.setToolTip("For future mesh exports (Tab 3)")
         self.export_opacity_cb = QCheckBox("Export with opacity")
         self.export_opacity_cb.setChecked(False)
-        # File size calculation is now manual only (button click)
+        self.export_opacity_cb.setToolTip("For future mesh exports (Tab 3)")
         export_options_row.addWidget(self.export_colors_cb)
         export_options_row.addWidget(self.export_opacity_cb)
         export_options_row.addStretch()
-        export_layout.addLayout(export_options_row)
+        canonical_layout.addLayout(export_options_row)
         
-        # Format-specific options (STL binary/ASCII)
-        self.stl_format_row = QHBoxLayout()
-        self.stl_format_row.addWidget(QLabel("STL format:"))
-        self.stl_binary_cb = QCheckBox("Binary (faster, smaller)")
-        self.stl_binary_cb.setChecked(True)
-        self.stl_binary_cb.setToolTip(
-            "Binary STL: Faster to write/read, smaller file size (default)\n"
-            "ASCII STL: Human-readable, larger file size"
-        )
-        # File size calculation is now manual only (button click)
-        self.stl_format_row.addWidget(self.stl_binary_cb)
-        self.stl_format_row.addStretch()
-        export_layout.addLayout(self.stl_format_row)
-        # Initially hide STL options (only show for STL format)
-        self.stl_format_row.itemAt(0).widget().setVisible(False)
-        self.stl_binary_cb.setVisible(False)
-        
-        # Opacity value (only enabled if opacity checkbox is checked)
+        # Opacity value (for future PLY export)
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Opacity (0.0-1.0):"))
         self.opacity_spin = QDoubleSpinBox()
@@ -459,17 +458,16 @@ class MesherWizard(QWidget):
         self.opacity_spin.setDecimals(2)
         self.opacity_spin.setEnabled(False)
         self.export_opacity_cb.toggled.connect(self._on_opacity_checkbox_toggled)
+        self.opacity_spin.setToolTip("For future mesh exports (Tab 3)")
         opacity_row.addWidget(self.opacity_spin)
         opacity_row.addStretch()
-        export_layout.addLayout(opacity_row)
+        canonical_layout.addLayout(opacity_row)
         
-        # File size estimation
+        # File size estimation (for NRRD + JSON)
         size_row = QHBoxLayout()
         self.calc_size_btn = QPushButton("Calculate approximate file size")
         self.calc_size_btn.setToolTip(
-            "Estimate the total file size based on current settings.\n"
-            "For multiple files: shows the sum of all files.\n"
-            "For single file: shows the size of that file."
+            "Estimate the file size for NRRD volume and JSON metadata files."
         )
         self.calc_size_btn.clicked.connect(self._on_calculate_file_size_clicked)
         size_row.addWidget(self.calc_size_btn)
@@ -477,14 +475,14 @@ class MesherWizard(QWidget):
         self.size_label.setStyleSheet("color: white; font-weight: bold;")
         size_row.addWidget(self.size_label)
         size_row.addStretch()
-        export_layout.addLayout(size_row)
+        canonical_layout.addLayout(size_row)
         
-        options_row.addWidget(export_group, stretch=1)
+        options_row.addWidget(canonical_group, stretch=1)
         
         main_layout.addLayout(options_row)
         
         # Export button
-        self.btn_export_meshes = QPushButton("Export meshes")
+        self.btn_export_meshes = QPushButton("Export NRRD Volume")
         self.btn_export_meshes.clicked.connect(self.on_export_meshes_clicked)
         self.btn_export_meshes.setEnabled(False)
         self.btn_export_meshes.setMaximumWidth(300)  # Smaller width
@@ -499,241 +497,69 @@ class MesherWizard(QWidget):
     # File size estimation
     # ------------------------------------------------------------------ #
     def _on_calculate_file_size_clicked(self) -> None:
-        """Handle button click to calculate file size in background thread."""
+        """Handle button click to calculate NRRD + JSON file size."""
         if self._volume is None:
             self.size_label.setText("(Load volume first)")
             self.size_label.setStyleSheet("color: red; font-weight: normal;")
             return
         
-        # Get current settings for the worker
-        bins = [b for b in self._collect_bins_from_table() if b.enabled]
-        if not bins:
-            self.size_label.setText("(No enabled bins)")
-            self.size_label.setStyleSheet("color: red; font-weight: normal;")
-            return
+        # Calculate NRRD file size (data size + gzip compression estimate)
+        from ct23d.core import volume as volmod
         
-        export_mode_text = self.export_mode_combo.currentText()
-        export_mode = "separate" if "Multiple" in export_mode_text else "combined"
-        format_name = self.format_combo.currentText().upper()
-        export_colors = self.export_colors_cb.isChecked() and format_name == "PLY"
-        export_opacity = self.export_opacity_cb.isChecked() and format_name == "PLY"
-        stl_binary = self.stl_binary_cb.isChecked() if format_name == "STL" else True
+        # Extract intensity data
+        if self._volume.ndim == 4 and self._volume.shape[-1] == 3:
+            intensity_data = volmod.to_intensity_max(self._volume)
+        else:
+            intensity_data = self._volume.copy()
         
-        # Create worker function
-        volume = self._volume  # Capture volume for worker thread
-        def calculate_task(progress_cb) -> str:
-            return self._calculate_file_size_impl(
-                volume, bins, export_mode, format_name, export_colors, export_opacity, stl_binary, progress_cb
-            )
-        
-        # Run in background thread
-        from ct23d.gui.workers import FunctionWorker
-        worker = FunctionWorker(calculate_task, with_progress=True)
-        
-        def on_success(result: str) -> None:
-            self.size_label.setText(result)
-            self.size_label.setStyleSheet("color: white; font-weight: bold;")
-        
-        def on_error(msg: str) -> None:
-            self.size_label.setText(f"(Error: {msg})")
-            self.size_label.setStyleSheet("color: red; font-weight: normal;")
-        
-        self.status.run_threaded_with_progress(
-            worker,
-            title="Calculating file size...",
-            on_success=on_success,
-        )
-        worker.error.connect(on_error)
-    
-    def _calculate_file_size_impl(
-        self,
-        volume: np.ndarray,
-        bins: list,
-        export_mode: str,
-        format_name: str,
-        export_colors: bool,
-        export_opacity: bool,
-        stl_binary: bool,
-        progress_cb,
-    ) -> str:
-        """Calculate file size (runs in background thread)."""
+        # Prepare data to check dtype (int16 or float32)
+        from ct23d.core.volume import prepare_volume_data_for_canonical
         try:
-            # Estimate mesh complexity from volume
-            volume_gray = volume.mean(axis=-1) if volume.ndim == 4 else volume
-            total_voxels = volume_gray.size
-            non_zero_voxels = np.count_nonzero(volume_gray)
-            
-            # Estimate vertices and faces per bin
-            # Marching cubes typically produces ~2 faces per surface voxel
-            # Each face has 3 vertices, but vertices are shared (~2 faces share 1 vertex)
-            # So roughly: vertices ≈ surface_voxels, faces ≈ 2 * surface_voxels
-            
-            total_estimated_size = 0
-            
-            if export_mode == "combined":
-                # Combined: estimate total mesh size
-                # Estimate surface voxels as a fraction of non-zero voxels
-                # This is a rough estimate - actual depends on bin ranges
-                estimated_surface_voxels = int(non_zero_voxels * 0.1)  # ~10% are on surface
-                estimated_vertices = estimated_surface_voxels
-                estimated_faces = estimated_surface_voxels * 2
-                
-                # Calculate file size
-                if format_name == "STL":
-                    if stl_binary:
-                        # Binary STL: 80 byte header + 4 bytes (face count) + 50 bytes per face
-                        total_estimated_size = 80 + 4 + (estimated_faces * 50)
-                    else:
-                        # ASCII STL: similar to PLY but simpler
-                        header_size = 100
-                        vertex_line_size = 30  # "vertex x y z\n"
-                        face_line_size = 20  # "facet normal ... endfacet\n"
-                        total_estimated_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
-                else:  # PLY
-                    header_size = 300
-                    if export_colors and export_opacity:
-                        vertex_line_size = 50
-                    elif export_colors or export_opacity:
-                        vertex_line_size = 45
-                    else:
-                        vertex_line_size = 30
-                    face_line_size = 18
-                    total_estimated_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
-            else:
-                # Separate: estimate size per bin and sum
-                total_bins = len(bins)
-                for i, bin_ in enumerate(bins):
-                    # Report progress
-                    progress_cb(i + 1, total_bins)
-                    
-                    # Estimate voxels in this bin range
-                    bin_mask = (volume_gray >= bin_.low) & (volume_gray < bin_.high)
-                    bin_voxels = np.count_nonzero(bin_mask)
-                    # Estimate surface voxels
-                    estimated_surface_voxels = int(bin_voxels * 0.1)  # ~10% are on surface
-                    estimated_vertices = estimated_surface_voxels
-                    estimated_faces = estimated_surface_voxels * 2
-                    
-                    # Calculate file size for this bin
-                    if format_name == "STL":
-                        if stl_binary:
-                            file_size = 80 + 4 + (estimated_faces * 50)
-                        else:
-                            header_size = 100
-                            vertex_line_size = 30
-                            face_line_size = 20
-                            file_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
-                    else:  # PLY
-                        header_size = 300
-                        if export_colors and export_opacity:
-                            vertex_line_size = 50
-                        elif export_colors or export_opacity:
-                            vertex_line_size = 45
-                        else:
-                            vertex_line_size = 30
-                        face_line_size = 18
-                        file_size = header_size + (estimated_vertices * vertex_line_size) + (estimated_faces * face_line_size)
-                    
-                    total_estimated_size += file_size
-            
-            # Convert to MB and return
-            size_mb = total_estimated_size / (1024 * 1024)
-            if size_mb < 0.1:
-                size_str = f"{size_mb * 1024:.1f} KB"
-            else:
-                size_str = f"{size_mb:.2f} MB"
-            
-            return size_str
-            
-        except Exception as e:
-            raise RuntimeError(f"Error calculating file size: {str(e)}")
-    
-    # ------------------------------------------------------------------ #
-    # Format capabilities and UI updates
-    # ------------------------------------------------------------------ #
-    def _get_format_capabilities(self, format_name: str) -> dict[str, bool]:
-        """
-        Get capabilities for a given format.
+            canonical_data, intensity_kind = prepare_volume_data_for_canonical(intensity_data, prefer_int16=True)
+        except ValueError:
+            # Data doesn't fit in int16, use float32
+            canonical_data, intensity_kind = prepare_volume_data_for_canonical(intensity_data, prefer_int16=False)
         
-        Format capabilities:
-        - PLY: Supports per-vertex colors (RGB) and per-vertex opacity (alpha channel) ✓
-        - STL: Does NOT support colors or opacity (geometry only) ✓
-        - OBJ: Supports colors via MTL files (not per-vertex), opacity via materials (not implemented)
-        - GLTF/GLB: Supports colors and opacity (not yet implemented)
-        - FBX: Supports colors and opacity (not yet implemented)
-        """
-        capabilities = {
-            "PLY": {"colors": True, "opacity": True, "implemented": True},
-            "STL": {"colors": False, "opacity": False, "implemented": True},
-            "OBJ": {"colors": False, "opacity": False, "implemented": False},  # Not implemented yet
-            "GLTF": {"colors": True, "opacity": True, "implemented": False},  # Not implemented yet
-            "GLB": {"colors": True, "opacity": True, "implemented": False},  # Not implemented yet
-            "FBX": {"colors": True, "opacity": True, "implemented": False},  # Not implemented yet
-        }
-        return capabilities.get(format_name.upper(), {"colors": False, "opacity": False, "implemented": False})
-    
-    def _on_format_changed(self, format_name: str) -> None:
-        """Update UI based on selected format capabilities."""
-        caps = self._get_format_capabilities(format_name)
+        # Calculate uncompressed data size
+        num_voxels = canonical_data.size
+        if canonical_data.dtype == np.int16:
+            uncompressed_size = num_voxels * 2  # 2 bytes per voxel
+        else:  # float32
+            uncompressed_size = num_voxels * 4  # 4 bytes per voxel
         
-        # Update format info label
-        info_parts = []
-        if caps["colors"]:
-            info_parts.append("per-vertex colors")
-        if caps["opacity"]:
-            info_parts.append("per-vertex opacity")
+        # Estimate gzip compression (typically 2-5x compression for medical data)
+        # Use conservative estimate of 3x compression
+        compressed_size = uncompressed_size // 3
         
-        if info_parts:
-            info_text = f"{format_name} supports {', '.join(info_parts)}"
-        else:
-            info_text = f"{format_name} supports geometry only (no colors or opacity)"
+        # Add header overhead (~1KB for NRRD header)
+        nrrd_size = compressed_size + 1024
         
-        if not caps.get("implemented", False):
-            info_text += " (not yet implemented)"
+        # Estimate JSON size (provenance metadata, typically 1-5KB)
+        json_size = 2048  # Conservative estimate
         
-        self.format_info_label.setText(info_text)
+        total_size = nrrd_size + json_size
         
-        # Show/hide STL-specific options
-        is_stl = format_name.upper() == "STL" and caps.get("implemented", False)
-        self.stl_format_row.itemAt(0).widget().setVisible(is_stl)
-        self.stl_binary_cb.setVisible(is_stl)
-        
-        # Enable/disable checkboxes based on format capabilities
-        self.export_colors_cb.setEnabled(caps["colors"] and caps.get("implemented", False))
-        if not caps["colors"] or not caps.get("implemented", False):
-            self.export_colors_cb.setChecked(False)
-            if not caps.get("implemented", False):
-                self.export_colors_cb.setToolTip(f"{format_name} format is not yet implemented")
-            else:
-                self.export_colors_cb.setToolTip(f"{format_name} does not support per-vertex colors")
-        else:
-            self.export_colors_cb.setToolTip(f"{format_name} supports per-vertex RGB colors")
-        
-        self.export_opacity_cb.setEnabled(caps["opacity"] and caps.get("implemented", False))
-        if not caps["opacity"] or not caps.get("implemented", False):
-            self.export_opacity_cb.setChecked(False)
-            self.opacity_spin.setEnabled(False)
-            if not caps.get("implemented", False):
-                self.export_opacity_cb.setToolTip(f"{format_name} format is not yet implemented")
-            else:
-                self.export_opacity_cb.setToolTip(f"{format_name} does not support per-vertex opacity")
-        else:
-            self.export_opacity_cb.setToolTip(f"{format_name} supports per-vertex alpha channel")
-            # Opacity checkbox state determines spinbox state
-            self._on_opacity_checkbox_toggled(self.export_opacity_cb.isChecked())
+        # Format file size
+        from ct23d.core.export import format_file_size
+        size_str = format_file_size(total_size)
+        self.size_label.setText(f"Estimated: {size_str} (NRRD + JSON)")
+        self.size_label.setStyleSheet("color: white; font-weight: bold;")
     
     def _on_opacity_checkbox_toggled(self, checked: bool) -> None:
         """Enable/disable opacity spinbox based on checkbox state."""
-        # Only enable if checkbox is checked AND format supports opacity AND is implemented
-        format_name = self.format_combo.currentText()
-        caps = self._get_format_capabilities(format_name)
-        self.opacity_spin.setEnabled(
-            checked and caps["opacity"] and caps.get("implemented", False)
-        )
+        # For future PLY export (Tab 3)
+        self.opacity_spin.setEnabled(checked)
     
     # ------------------------------------------------------------------ #
     # Directory selection
     # ------------------------------------------------------------------ #
+    def _update_export_button_state(self) -> None:
+        """Update the export button enabled state based on volume and output directory."""
+        # Enable export button only if both volume is loaded and output directory is selected
+        volume_loaded = self._volume is not None
+        output_dir_selected = self._output_dir is not None
+        self.btn_export_meshes.setEnabled(volume_loaded and output_dir_selected)
+    
     def _on_select_processed_dir(self) -> None:
         # Start with default directory if available
         start_dir = str(self._default_processed_dir) if self._default_processed_dir else ""
@@ -761,27 +587,8 @@ class MesherWizard(QWidget):
         This will be used as the default input for meshing.
         """
         self._default_processed_dir = path
-        if path is not None and path.exists():
-            # Auto-set if not already set
-            if self._processed_dir is None:
-                self._processed_dir = path
-                self.processed_label.setText(
-                    f"Processed slices directory: {path} (default from preprocessing)"
-                )
-                self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                # Auto-load volume and show preview (but don't auto-populate bins)
-                self.load_volume_only()
-                
-                # Notify main window to update patient info if callback is set
-                if hasattr(self, '_patient_info_callback') and self._patient_info_callback:
-                    QTimer.singleShot(100, self._patient_info_callback)
-            else:
-                # Update label to show default is available
-                self.processed_label.setText(
-                    f"Processed slices directory: {self._processed_dir}\n"
-                    f"(Default available: {path})"
-                )
-                self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # Don't auto-load - wait for user to manually select the directory
+        # The default directory will be shown as a hint when user opens the file dialog
 
     def _on_select_output_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -789,6 +596,22 @@ class MesherWizard(QWidget):
             return
         self._output_dir = Path(folder)
         self.output_label.setText(f"Output directory: {folder}")
+        # Update export button state after selecting output directory
+        self._update_export_button_state()
+    
+    def _on_select_canonical_path(self) -> None:
+        """Select custom path for canonical volume save."""
+        default_path = self._canonical_volume_path or Path("output_volume.nrrd")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save canonical volume as...",
+            str(default_path),
+            "NRRD files (*.nrrd);;All files (*.*)"
+        )
+        if path:
+            self._canonical_volume_path = Path(path)
+            self.canonical_path_label.setText(f"Path: {path}")
+            self.canonical_path_label.setStyleSheet("color: white;")
 
     # ------------------------------------------------------------------ #
     # Helpers to build configs
@@ -878,18 +701,18 @@ class MesherWizard(QWidget):
             enabled_item.setCheckState(Qt.Checked)
 
             # Create spinboxes for Low and High (integers)
-            # Use detected range for spinbox limits
-            min_val = max(1, vmin_int)
-            max_val = vmax_int
+            # Allow bins to move freely (no range restrictions after initial creation)
+            # Use full intensity range (1-255 for uint8, or 1-65535 for DICOM)
+            max_range = 65535 if self._is_dicom else 255
             low_spin = QSpinBox()
-            low_spin.setRange(min_val, max_val)
+            low_spin.setRange(1, max_range)  # Allow free movement
             low_spin.setValue(bin.low)
             low_spin.setSingleStep(1)
             low_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'low', val))
             self._bin_low_spinboxes.append(low_spin)
             
             high_spin = QSpinBox()
-            high_spin.setRange(min_val, max_val)
+            high_spin.setRange(1, max_range)  # Allow free movement
             high_spin.setValue(bin.high)
             high_spin.setSingleStep(1)
             high_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'high', val))
@@ -946,18 +769,18 @@ class MesherWizard(QWidget):
             enabled_item.setCheckState(Qt.Checked)
 
             # Create spinboxes for Low and High (integers)
-            # Ensure minimum is at least 1
-            min_val = max(1, int(round(vmin)))
-            max_val = int(round(vmax))
+            # Allow bins to move freely (no range restrictions after initial creation)
+            # Use full intensity range (1-255 for uint8, or 1-65535 for DICOM)
+            max_range = 65535 if self._is_dicom else 255
             low_spin = QSpinBox()
-            low_spin.setRange(min_val, max_val)
-            low_spin.setValue(max(min_val, int(round(edges[i]))))
+            low_spin.setRange(1, max_range)  # Allow free movement
+            low_spin.setValue(max(1, int(round(edges[i]))))
             low_spin.setSingleStep(1)
             low_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'low', val))
             self._bin_low_spinboxes.append(low_spin)
             
             high_spin = QSpinBox()
-            high_spin.setRange(min_val, max_val)
+            high_spin.setRange(1, max_range)  # Allow free movement
             high_spin.setValue(int(round(edges[i + 1])))
             high_spin.setSingleStep(1)
             high_spin.valueChanged.connect(lambda val, row=i: self._on_bin_spin_changed(row, 'high', val))
@@ -1252,6 +1075,8 @@ class MesherWizard(QWidget):
             # Update Z height calculation
             self._update_z_height()
             
+            # Don't auto-save canonical volume - user must click export button
+            
             # Now compute histogram graphs - update the existing progress dialog
             num_slices = volume.shape[0]
             base_progress = total_slices + 1  # Already completed: slices + building volume
@@ -1297,6 +1122,8 @@ class MesherWizard(QWidget):
                 # Update range lines on histogram if visualize is enabled
                 self._update_range_lines_on_histogram()
                 QApplication.processEvents()
+                
+                # Don't auto-save canonical volume - user must click export button
             except Exception as e:
                 print(f"Error computing histogram graphs: {e}")
                 import traceback
@@ -1357,6 +1184,13 @@ class MesherWizard(QWidget):
                     low = 1
                     if high <= low:
                         high = low + 1
+                
+                # Ensure first bin's min equals bin_min, and last bin's max equals bin_max
+                if idx == 0:
+                    low = bin_min  # First bin: min equals intensity range min
+                if idx == n_bins - 1:
+                    high = bin_max  # Last bin: max equals intensity range max
+                
                 generated_bins.append(
                     IntensityBin(
                         index=idx,
@@ -1375,6 +1209,26 @@ class MesherWizard(QWidget):
                 # Fallback to uniform if no values in range
                 filtered_values = hist_values
             optimal_bins = binsmod.generate_optimal_bins(filtered_values, min_bins=n_bins, max_bins=n_bins)
+            
+            # Ensure first bin's min equals bin_min, and last bin's max equals bin_max
+            if optimal_bins:
+                optimal_bins[0] = IntensityBin(
+                    index=optimal_bins[0].index,
+                    low=bin_min,  # First bin: min equals intensity range min
+                    high=optimal_bins[0].high,
+                    name=optimal_bins[0].name,
+                    color=optimal_bins[0].color,
+                    enabled=optimal_bins[0].enabled,
+                )
+                optimal_bins[-1] = IntensityBin(
+                    index=optimal_bins[-1].index,
+                    low=optimal_bins[-1].low,
+                    high=bin_max,  # Last bin: max equals intensity range max
+                    name=optimal_bins[-1].name,
+                    color=optimal_bins[-1].color,
+                    enabled=optimal_bins[-1].enabled,
+                )
+            
             generated_bins = optimal_bins
         else:
             # Interpolate between uniform and auto-bins
@@ -1391,6 +1245,13 @@ class MesherWizard(QWidget):
                     low = 1
                     if high <= low:
                         high = low + 1
+                
+                # Ensure first bin's min equals bin_min, and last bin's max equals bin_max
+                if idx == 0:
+                    low = bin_min  # First bin: min equals intensity range min
+                if idx == n_bins - 1:
+                    high = bin_max  # Last bin: max equals intensity range max
+                
                 uniform_bins.append((low, high))
             
             # Auto-bins
@@ -1436,6 +1297,13 @@ class MesherWizard(QWidget):
                     low = 1
                     if high <= low:
                         high = low + 1
+                
+                # Ensure first bin's min equals bin_min, and last bin's max equals bin_max
+                if idx == 0:
+                    low = bin_min  # First bin: min equals intensity range min
+                if idx == n_bins - 1:
+                    high = bin_max  # Last bin: max equals intensity range max
+                
                 generated_bins.append(
                     IntensityBin(
                         index=idx,
@@ -1457,7 +1325,8 @@ class MesherWizard(QWidget):
         if hasattr(self, 'histogram'):
             self.histogram.update_bins(bins)
         
-        self.status.show_info(f"Applied {len(generated_bins)} bins with uniformity {uniformity:.2f}.")
+        # Don't show pop-up notification - operation is quick, just update status bar
+        self.status.show_message(f"Applied {len(generated_bins)} bins with uniformity {uniformity:.2f}.", timeout_ms=3000)
     
     def load_volume_and_histogram(self) -> None:
         if self._processed_dir is None:
@@ -1604,7 +1473,8 @@ class MesherWizard(QWidget):
             
             # File size calculation is now manual only (button click)
             
-            self.btn_export_meshes.setEnabled(True)
+            # Update export button state (requires both volume and output directory)
+            self._update_export_button_state()
             
             # Update Z height calculation
             self._update_z_height()
@@ -1685,10 +1555,380 @@ class MesherWizard(QWidget):
         pass
     
     # ------------------------------------------------------------------ #
+    # Canonical volume save
+    # ------------------------------------------------------------------ #
+    def _save_canonical_volume_async(self) -> None:
+        """
+        Start canonical volume save in a background thread to avoid blocking UI.
+        
+        This checks data type compatibility in the main thread first (to show dialogs),
+        then runs the actual save in a background thread.
+        """
+        if not self.save_canonical_cb.isChecked():
+            return  # Canonical volume save is disabled
+        
+        if self._volume is None:
+            return  # No volume to save
+        
+        # Extract intensity data in main thread (quick operation)
+        from ct23d.core import volume as volmod
+        if self._volume.ndim == 4 and self._volume.shape[-1] == 3:
+            intensity_data = volmod.to_intensity_max(self._volume)
+        else:
+            intensity_data = self._volume.copy()
+        
+        # Check if data fits in int16 (in main thread so we can show dialog if needed)
+        prefer_int16 = True
+        try:
+            # Try to prepare data to check if it fits
+            _, _ = prepare_volume_data_for_canonical(intensity_data, prefer_int16=True)
+        except ValueError:
+            # Data doesn't fit in int16 - ask user for confirmation (must be in main thread)
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                "Use float32 for canonical volume?",
+                f"CT data range exceeds int16 limits. Use float32 format instead?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                prefer_int16 = False
+            else:
+                # User declined - skip saving
+                self.status.show_warning("Canonical volume save cancelled (data doesn't fit in int16).")
+                return
+        
+        # Collect all UI-dependent data in the main thread (before background worker)
+        spacing_z, spacing_y, spacing_x = self._collect_spacing()
+        spacing = (spacing_x, spacing_y, spacing_z)  # (sx, sy, sz) in physical space
+        
+        # Collect bin information (must be done in main thread)
+        bins_data = None
+        try:
+            bins = self._collect_bins_from_table()
+            if bins:
+                bins_data = [
+                    {
+                        "low": b.low,
+                        "high": b.high,
+                        "name": b.name,
+                        "enabled": b.enabled,
+                        "color": list(b.color) if b.color is not None else None,
+                    }
+                    for b in bins
+                ]
+        except Exception:
+            pass  # Bins not available, skip
+        
+        # Determine output path (must be done in main thread)
+        if self._canonical_volume_path is not None:
+            output_path = self._canonical_volume_path
+        elif self._output_dir is not None:
+            output_path = self._output_dir / "output_volume.nrrd"
+        else:
+            # Fallback: use processed directory
+            if self._processed_dir is not None:
+                output_path = self._processed_dir / "output_volume.nrrd"
+            else:
+                self.status.show_error("Cannot determine output path for canonical volume.")
+                return
+        
+        # Create a custom worker with phase progress for NRRD/JSON export
+        class CanonicalVolumeSaveWorker(WorkerBase):
+            phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
+            
+            def __init__(self, intensity_data, prefer_int16, spacing, bins_data, output_path, processed_dir, is_dicom, wizard_ref):
+                super().__init__()
+                self._intensity_data = intensity_data
+                self._prefer_int16 = prefer_int16
+                self._spacing = spacing
+                self._bins_data = bins_data
+                self._output_path = output_path
+                self._processed_dir = processed_dir
+                self._is_dicom = is_dicom
+                self._wizard_ref = wizard_ref
+            
+            def run(self) -> None:  # type: ignore[override]
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    
+                    # Calculate file sizes beforehand
+                    # Estimate uncompressed NRRD size (account for data type conversion)
+                    if self._prefer_int16:
+                        # Data will be converted to int16 (2 bytes per voxel)
+                        bytes_per_voxel = 2
+                    else:
+                        # Data will be converted to float32 (4 bytes per voxel)
+                        bytes_per_voxel = 4
+                    uncompressed_size = self._intensity_data.size * bytes_per_voxel
+                    # Estimate compressed NRRD size (gzip typically achieves ~3:1 compression for medical data)
+                    estimated_nrrd_size = uncompressed_size // 3
+                    # Add overhead for NRRD header (typically a few KB)
+                    estimated_nrrd_size += 2048
+                    
+                    # Estimate JSON size (provenance + direction if needed)
+                    import json
+                    provenance_dict = {
+                        "source": {
+                            "processed_slices_dir": str(self._processed_dir) if self._processed_dir else None,
+                        },
+                        "spacing": {
+                            "x": self._spacing[0],
+                            "y": self._spacing[1],
+                            "z": self._spacing[2],
+                        },
+                        "volume_shape": list(self._intensity_data.shape),
+                        "is_dicom": self._is_dicom,
+                    }
+                    if self._bins_data:
+                        provenance_dict["intensity_bins"] = self._bins_data
+                    # Estimate JSON size (usually small, ~1-5 KB)
+                    json_str = json.dumps(provenance_dict)
+                    estimated_json_size = len(json_str.encode('utf-8'))
+                    # Add some overhead for formatting and potential direction matrix
+                    estimated_json_size += 1024
+                    
+                    total_size = estimated_nrrd_size + estimated_json_size
+                    
+                    # Phase 1: Exporting NRRD
+                    self.phase_progress.emit("Exporting NRRD", 0, estimated_nrrd_size, total_size)
+                    self.progress.emit(0, total_size)
+                    
+                    # Prepare data for canonical format
+                    canonical_data, intensity_kind = prepare_volume_data_for_canonical(
+                        self._intensity_data,
+                        prefer_int16=self._prefer_int16
+                    )
+                    
+                    # Get provenance information
+                    from ct23d import __version__
+                    provenance = {
+                        "source": {
+                            "processed_slices_dir": str(self._processed_dir) if self._processed_dir else None,
+                        },
+                        "build_timestamp": datetime.now().isoformat(),
+                        "app_version": __version__,
+                        "spacing": {
+                            "x": self._spacing[0],
+                            "y": self._spacing[1],
+                            "z": self._spacing[2],
+                        },
+                        "volume_shape": list(canonical_data.shape),
+                        "intensity_range": {
+                            "min": float(canonical_data.min()),
+                            "max": float(canonical_data.max()),
+                        },
+                        "is_dicom": self._is_dicom,
+                    }
+                    
+                    # Add bin information if available
+                    if self._bins_data:
+                        provenance["intensity_bins"] = self._bins_data
+                    
+                    # Ensure output directory exists
+                    self._output_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Create CanonicalVolume
+                    canonical_volume = CanonicalVolume(
+                        data=canonical_data,
+                        spacing=self._spacing,
+                        origin=(0.0, 0.0, 0.0),
+                        direction=None,
+                        intensity_kind=intensity_kind,
+                        provenance=provenance,
+                    )
+                    
+                    # Save to NRRD with progress tracking
+                    # Since nrrd.write() is blocking, we'll monitor file size as it grows
+                    # Start monitoring file size in a separate thread
+                    file_size_monitor_running = threading.Event()
+                    file_size_monitor_running.set()
+                    
+                    def monitor_file_size():
+                        """Monitor file size and emit progress updates."""
+                        last_size = 0
+                        while file_size_monitor_running.is_set():
+                            try:
+                                if self._output_path.exists():
+                                    current_size = os.path.getsize(self._output_path)
+                                    if current_size > last_size:
+                                        # Emit progress update
+                                        progress_bytes = min(current_size, estimated_nrrd_size)
+                                        self.phase_progress.emit("Exporting NRRD", progress_bytes, estimated_nrrd_size, total_size)
+                                        self.progress.emit(progress_bytes, total_size)
+                                        last_size = current_size
+                                        
+                                        # If we've reached the estimated size, we're likely done
+                                        if current_size >= estimated_nrrd_size * 0.95:  # 95% threshold
+                                            break
+                            except (OSError, FileNotFoundError):
+                                pass
+                            time.sleep(0.1)  # Check every 100ms
+                    
+                    # Start monitoring thread
+                    monitor_thread = threading.Thread(target=monitor_file_size, daemon=True)
+                    monitor_thread.start()
+                    
+                    # Perform the actual save
+                    save_volume_nrrd(canonical_volume, self._output_path)
+                    
+                    # Stop monitoring and wait a bit for final update
+                    file_size_monitor_running.clear()
+                    time.sleep(0.2)  # Give monitor thread time to check final size
+                    
+                    # Get final file size
+                    final_size = os.path.getsize(self._output_path) if self._output_path.exists() else estimated_nrrd_size
+                    final_size = min(final_size, estimated_nrrd_size)
+                    
+                    # Update progress (NRRD phase complete)
+                    self.phase_progress.emit("Exporting NRRD", final_size, estimated_nrrd_size, total_size)
+                    self.progress.emit(final_size, total_size)
+                    QApplication.processEvents()
+                    
+                    # Phase 2: Exporting JSON (JSON is already saved by save_volume_nrrd, just mark complete)
+                    self.phase_progress.emit("Exporting JSON", 0, estimated_json_size, total_size)
+                    self.progress.emit(estimated_nrrd_size, total_size)
+                    QApplication.processEvents()
+                    
+                    # Mark JSON complete
+                    self.phase_progress.emit("Exporting JSON", estimated_json_size, estimated_json_size, total_size)
+                    self.progress.emit(total_size, total_size)
+                    
+                    # Update UI (must use QTimer to update from background thread)
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: self._wizard_ref._on_canonical_volume_saved(self._output_path))
+                    
+                    self.finished.emit(None)
+                    
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self.error.emit(str(e))
+        
+        # Create worker with all necessary parameters
+        worker = CanonicalVolumeSaveWorker(
+            intensity_data=intensity_data,
+            prefer_int16=prefer_int16,
+            spacing=spacing,
+            bins_data=bins_data,
+            output_path=output_path,
+            processed_dir=str(self._processed_dir) if self._processed_dir else None,
+            is_dicom=self._is_dicom,
+            wizard_ref=self,
+        )
+        
+        def on_success(_result: object) -> None:
+            pass  # Success is handled in the worker
+        
+        def on_error(error_msg: str) -> None:
+            self.status.show_error(f"Failed to save canonical volume: {error_msg}")
+        
+        # Use status controller to show progress dialog
+        self.status.run_threaded_with_progress(
+            worker,
+            "Exporting NRRD volume and JSON metadata...",
+            on_success=on_success,
+        )
+        worker.error.connect(on_error)
+    
+    def _on_canonical_volume_saved(self, output_path: Path) -> None:
+        """Update UI after canonical volume is saved (called from background thread via QTimer)."""
+        self.canonical_path_label.setText(f"Saved: {output_path}")
+        self.canonical_path_label.setStyleSheet("color: green;")
+        self.status.show_info(
+            f"Export complete: NRRD volume and JSON metadata saved.\n"
+            f"NRRD: {output_path}\n"
+            f"JSON: {output_path.with_suffix('.json')}"
+        )
+    
+    def _save_canonical_volume_sync(
+        self,
+        intensity_data: np.ndarray,
+        prefer_int16: bool,
+        spacing: Tuple[float, float, float],
+        bins_data: Optional[List[dict]],
+        output_path: Path,
+        processed_dir: Optional[str],
+        is_dicom: bool,
+    ) -> None:
+        """
+        Actually save the canonical volume (runs in background thread).
+        
+        All UI-dependent data must be collected in the main thread and passed as parameters.
+        """
+        try:
+            # Prepare data for canonical format (already checked in main thread)
+            canonical_data, intensity_kind = prepare_volume_data_for_canonical(
+                intensity_data,
+                prefer_int16=prefer_int16
+            )
+            
+            # Get provenance information
+            from ct23d import __version__
+            provenance = {
+                "source": {
+                    "processed_slices_dir": processed_dir,
+                },
+                "build_timestamp": datetime.now().isoformat(),
+                "app_version": __version__,
+                "spacing": {
+                    "x": spacing[0],
+                    "y": spacing[1],
+                    "z": spacing[2],
+                },
+                "volume_shape": list(canonical_data.shape),
+                "intensity_range": {
+                    "min": float(canonical_data.min()),
+                    "max": float(canonical_data.max()),
+                },
+                "is_dicom": is_dicom,
+            }
+            
+            # Add bin information if available
+            if bins_data:
+                provenance["intensity_bins"] = bins_data
+            
+            # Ensure output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create CanonicalVolume
+            canonical_volume = CanonicalVolume(
+                data=canonical_data,
+                spacing=spacing,
+                origin=(0.0, 0.0, 0.0),  # Default origin
+                direction=None,  # Default to identity
+                intensity_kind=intensity_kind,
+                provenance=provenance,
+            )
+            
+            # Save to NRRD
+            save_volume_nrrd(canonical_volume, output_path)
+            
+            # Update UI label (must use QTimer to update from background thread)
+            from PySide6.QtCore import QTimer
+            def update_ui() -> None:
+                self.canonical_path_label.setText(f"Saved: {output_path}")
+                self.canonical_path_label.setStyleSheet("color: green;")
+                self.status.show_info(
+                    f"Export complete: NRRD volume and JSON metadata saved.\n"
+                    f"NRRD: {output_path}\n"
+                    f"JSON: {output_path.with_suffix('.json')}"
+                )
+            QTimer.singleShot(0, update_ui)
+            
+        except Exception as e:
+            # Don't call status.show_error from background thread - let exception propagate
+            # so the worker's error signal handler can catch it in the main thread
+            import traceback
+            traceback.print_exc()
+            raise  # Re-raise so worker.error signal is emitted
+    
+    # ------------------------------------------------------------------ #
     # Export meshes
     # ------------------------------------------------------------------ #
     def on_export_meshes_clicked(self) -> None:
-        """Export meshes with bin colors and optional opacity."""
+        """Export canonical volume as NRRD and JSON."""
         if self._volume is None:
             self.status.show_error("Please load a volume first.")
             return
@@ -1696,167 +1936,13 @@ class MesherWizard(QWidget):
             self.status.show_error("Please select an output directory.")
             return
         
-        bins = [b for b in self._collect_bins_from_table() if b.enabled]
-        if not bins:
-            self.status.show_error("No enabled intensity bins to export.")
+        if not self.save_canonical_cb.isChecked():
+            self.status.show_error("Please enable 'Save canonical volume' to export.")
             return
         
-        # Get export options from UI
-        export_mode_text = self.export_mode_combo.currentText()
-        export_mode = "separate" if "Multiple" in export_mode_text else "combined"
-        
-        # Get opacity if enabled
-        opacity = None
-        if self.export_opacity_cb.isChecked():
-            opacity = float(self.opacity_spin.value())
-            if opacity >= 1.0:
-                opacity = None  # Don't add alpha channel if fully opaque
-        
-        filename_prefix = self.edit_prefix.text().strip() or "ct_layer"
-        
-        spacing = self._collect_spacing()
-        # Get intensity range from current range (set when volume is loaded)
-        if self._current_range is not None:
-            vmin, vmax = self._current_range
-            vmin = int(round(vmin))
-            vmax = int(round(vmax))
-        else:
-            # Fallback if no volume loaded yet
-            vmin, vmax = 1, 255
-        
-        cfg = MeshingConfig(
-            spacing=spacing,
-            min_intensity=vmin,
-            max_intensity=vmax,
-            smoothing_sigma=float(self.spin_smoothing_sigma.value()),
-            min_component_size=int(self.spin_min_component_size.value()),
-            enable_component_filtering=self.enable_component_filtering_cb.isChecked(),
-            enable_smoothing=self.enable_smoothing_cb.isChecked(),
-        )
-        cfg.opacity = opacity  # Add opacity to config
-        
-        volume = self._volume
-        output_dir = self._output_dir
-        total_bins = len(bins)
-        
-        # Get format and capabilities
-        export_format = self.format_combo.currentText().upper()
-        caps = self._get_format_capabilities(export_format)
-        
-        # Get STL binary option
-        stl_binary = self.stl_binary_cb.isChecked() if export_format == "STL" else True
-        
-        # Validate format is implemented
-        if not caps.get("implemented", False):
-            self.status.show_error(
-                f"Format '{export_format}' is not yet implemented. "
-                "Currently only PLY and STL formats are supported."
-            )
-            return
-        
-        # Capture export colors setting before creating worker
-        export_colors = self.export_colors_cb.isChecked() and caps["colors"]
-        
-        # Create a custom worker with phase-aware progress for export
-        class ExportWorker(WorkerBase):
-            phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
-            
-            def __init__(self):
-                super().__init__()
-                self._cancelled = False
-            
-            def run(self) -> None:  # type: ignore[override]
-                try:
-                    from PySide6.QtWidgets import QApplication
-                    
-                    def phase_cb(phase: str, current: int, phase_total: int, overall_total: int) -> None:
-                        # Check for interruption request FIRST, before any other operations
-                        if self.isInterruptionRequested():
-                            self._cancelled = True
-                            raise InterruptedError("Export was cancelled by user")
-                        # Only emit progress if not cancelled
-                        if not self._cancelled:
-                            self.phase_progress.emit(phase, current, phase_total, overall_total)
-                            self.progress.emit(current, overall_total)
-                            # Process events to keep UI responsive and prevent freezing
-                            QApplication.processEvents()
-                        else:
-                            # Already cancelled, stop immediately
-                            raise InterruptedError("Export was cancelled by user")
-                    
-                    def progress_cb(current: int, total: int) -> None:
-                        # Check for interruption request
-                        if self.isInterruptionRequested():
-                            self._cancelled = True
-                            raise InterruptedError("Export was cancelled by user")
-                        # Only emit progress if not cancelled
-                        if not self._cancelled:
-                            self.progress.emit(current, total)
-                        else:
-                            # Already cancelled, stop immediately
-                            raise InterruptedError("Export was cancelled by user")
-                    
-                    # Check before starting
-                    if self.isInterruptionRequested():
-                        raise InterruptedError("Export was cancelled by user")
-                    
-                    # Apply colors option: if not exporting colors or format doesn't support it, remove colors
-                    export_bins = bins
-                    if not export_colors:
-                        # Create bins without colors
-                        from ct23d.core.models import IntensityBin
-                        export_bins = [
-                            IntensityBin(
-                                index=b.index,
-                                enabled=b.enabled,
-                                low=b.low,
-                                high=b.high,
-                                name=b.name,
-                                color=None,  # Remove color
-                            )
-                            for b in bins
-                        ]
-                    
-                    # Export uses the same meshing functions, so it will get phase progress
-                    export_core.export_bins_to_meshes(
-                        volume=volume,
-                        bins=export_bins,
-                        config=cfg,
-                        output_dir=output_dir,
-                        filename_prefix=filename_prefix,
-                        export_mode=export_mode,
-                        format_name=export_format,
-                        opacity=opacity if caps["opacity"] else None,  # Only pass opacity if format supports it
-                        stl_binary=stl_binary,  # STL format option
-                        progress_callback=progress_cb,
-                        phase_progress_callback=phase_cb,
-                    )
-                    
-                    # Check one more time before finishing
-                    if self.isInterruptionRequested() or self._cancelled:
-                        raise InterruptedError("Export was cancelled by user")
-                    
-                    self.finished.emit(total_bins)
-                except InterruptedError:
-                    # User cancelled - emit error signal
-                    self.error.emit("Export was cancelled by user")
-                except BaseException as exc:  # noqa: BLE001
-                    self._handle_exception(exc)
-        
-        worker = ExportWorker()
-        
-        def on_success(result: object) -> None:
-            n = int(result)
-            if export_mode == "combined":
-                self.status.show_info(f"Export complete: 1 combined file with {n} bins.")
-            else:
-                self.status.show_info(f"Export complete: {n} separate files generated.")
-        
-        self.status.run_threaded_with_progress(
-            worker,
-            "Exporting meshes...",
-            on_success=on_success,
-        )
+        # Export NRRD + JSON by calling the canonical volume save function
+        # This will save to the selected path or default location
+        self._save_canonical_volume_async()
     
     # ------------------------------------------------------------------ #
     # Bin management

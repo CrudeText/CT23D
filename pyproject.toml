@@ -20,6 +20,9 @@ dependencies = [
     "pyqtgraph",
     "pyyaml",
     "pydicom",
+    "pynrrd",
+    "pyvista",
+    "pyvistaqt",
 ]
 
 [project.optional-dependencies]

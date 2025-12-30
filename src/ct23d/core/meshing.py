@@ -234,7 +234,7 @@ def extract_mesh(
     if progress_callback:
         progress_callback(1, 3)  # Step 2: Marching cubes complete
 
-    # Sample colors if volume_color is provided
+    # Sample colors if volume_color is provided (can be slow for many vertices)
     colors = None
     if volume_color is not None:
         if volume_color.ndim != 4 or volume_color.shape[-1] != 3:
@@ -244,14 +244,33 @@ def extract_mesh(
 
         zmax, ymax, xmax, _ = volume_color.shape
         # verts_vox are in (z, y, x)
-        z_idx = np.clip(np.round(verts_vox[:, 0]).astype(int), 0, zmax - 1)
-        y_idx = np.clip(np.round(verts_vox[:, 1]).astype(int), 0, ymax - 1)
-        x_idx = np.clip(np.round(verts_vox[:, 2]).astype(int), 0, xmax - 1)
-
-        colors = volume_color[z_idx, y_idx, x_idx].astype(np.uint8)
+        # Sample colors in batches for progress updates if there are many vertices
+        n_verts = verts_vox.shape[0]
+        if progress_callback and n_verts > 10000:
+            # For large meshes, sample colors in batches and update progress
+            batch_size = max(5000, n_verts // 20)  # Update every 5% or every 5000 vertices
+            colors_list = []
+            for batch_start in range(0, n_verts, batch_size):
+                batch_end = min(batch_start + batch_size, n_verts)
+                batch_verts = verts_vox[batch_start:batch_end]
+                z_idx = np.clip(np.round(batch_verts[:, 0]).astype(int), 0, zmax - 1)
+                y_idx = np.clip(np.round(batch_verts[:, 1]).astype(int), 0, ymax - 1)
+                x_idx = np.clip(np.round(batch_verts[:, 2]).astype(int), 0, xmax - 1)
+                batch_colors = volume_color[z_idx, y_idx, x_idx].astype(np.uint8)
+                colors_list.append(batch_colors)
+                # Update progress (step 2 + progress through color sampling)
+                if progress_callback:
+                    color_progress = batch_end / n_verts
+                    progress_callback(2 + int(color_progress), 3)
+            colors = np.vstack(colors_list)
+        else:
+            z_idx = np.clip(np.round(verts_vox[:, 0]).astype(int), 0, zmax - 1)
+            y_idx = np.clip(np.round(verts_vox[:, 1]).astype(int), 0, ymax - 1)
+            x_idx = np.clip(np.round(verts_vox[:, 2]).astype(int), 0, xmax - 1)
+            colors = volume_color[z_idx, y_idx, x_idx].astype(np.uint8)
     
     if progress_callback:
-        progress_callback(2, 3)  # Step 3: Colors sampled
+        progress_callback(3, 3)  # Step 3: Colors sampled
 
     # Scale to physical units using cfg.spacing = (z, y, x)
     sz, sy, sx = cfg.spacing
@@ -361,7 +380,8 @@ def save_mesh_ply(
             progress_callback(bytes_written, estimated_total_size)
         
         # Vertices - write in batches and report progress
-        batch_size = max(1000, n_verts // 100)  # Update progress every 1% or every 1000 vertices
+        # Use smaller batch size for more frequent progress updates (prevents UI freezing)
+        batch_size = max(500, n_verts // 200)  # Update progress every 0.5% or every 500 vertices
         if has_colors and has_opacity:
             for i, ((x, y, z), (r, g, b)) in enumerate(zip(vertices, colors)):
                 f.write(f"{x:.6f} {y:.6f} {z:.6f} {int(r)} {int(g)} {int(b)} {alpha_value}\n")
@@ -392,7 +412,8 @@ def save_mesh_ply(
                     progress_callback(bytes_written, estimated_total_size)
 
         # Faces - write in batches and report progress
-        face_batch_size = max(1000, n_faces // 100)  # Update progress every 1% or every 1000 faces
+        # Use smaller batch size for more frequent progress updates (prevents UI freezing)
+        face_batch_size = max(500, n_faces // 200)  # Update progress every 0.5% or every 500 faces
         for i, (a, b, c) in enumerate(faces):
             f.write(f"3 {int(a)} {int(b)} {int(c)}\n")
             bytes_written += 18  # Approximate
@@ -420,6 +441,7 @@ def save_mesh_stl(
     vertices: np.ndarray,
     faces: np.ndarray,
     binary: bool = True,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """
     Save a mesh as an STL file (binary or ASCII format).
@@ -438,6 +460,8 @@ def save_mesh_stl(
     binary:
         If True, save as binary STL (default, faster and smaller).
         If False, save as ASCII STL (human-readable).
+    progress_callback:
+        Optional callback function(bytes_written, total_bytes) for progress updates.
     """
     import struct
     
@@ -447,15 +471,34 @@ def save_mesh_stl(
     n_verts = vertices.shape[0]
     n_faces = faces.shape[0]
     
+    # Estimate file size for progress tracking
+    if binary:
+        # Binary STL: 80 byte header + 4 bytes (face count) + 50 bytes per face
+        estimated_total_size = 80 + 4 + (n_faces * 50)
+    else:
+        # ASCII STL: header + face data
+        estimated_total_size = 100 + (n_faces * 100)  # Rough estimate
+    
+    if progress_callback:
+        progress_callback(0, estimated_total_size)
+    
     if binary:
         # Binary STL format
         with path.open("wb") as f:
             # 80-byte header (usually contains description, but we'll leave it empty)
             header = b"CT23D STL Export" + b"\x00" * (80 - 16)
             f.write(header)
+            bytes_written = len(header)
+            
+            if progress_callback:
+                progress_callback(bytes_written, estimated_total_size)
             
             # Number of triangles (4 bytes, unsigned int)
             f.write(struct.pack("<I", n_faces))
+            bytes_written += 4
+            
+            if progress_callback:
+                progress_callback(bytes_written, estimated_total_size)
             
             # For each triangle:
             # - Normal vector (3 floats, 12 bytes) - we'll compute it
@@ -463,7 +506,9 @@ def save_mesh_stl(
             # - Vertex 2 (3 floats, 12 bytes)
             # - Vertex 3 (3 floats, 12 bytes)
             # - Attribute byte count (2 bytes, usually 0)
-            for face in faces:
+            # Use batches for progress updates
+            batch_size = max(500, n_faces // 200)  # Update every 0.5% or every 500 faces
+            for i, face in enumerate(faces):
                 # Get triangle vertices
                 v0 = vertices[face[0]]
                 v1 = vertices[face[1]]
@@ -489,6 +534,15 @@ def save_mesh_stl(
                 
                 # Attribute byte count (usually 0)
                 f.write(struct.pack("<H", 0))
+                
+                bytes_written += 50  # Each face is 50 bytes
+                
+                # Update progress periodically
+                if progress_callback and (i + 1) % batch_size == 0:
+                    progress_callback(bytes_written, estimated_total_size)
+            
+            if progress_callback:
+                progress_callback(estimated_total_size, estimated_total_size)
             
             # Explicitly flush and sync the file to ensure it's written and released on Windows
             f.flush()
@@ -502,8 +556,13 @@ def save_mesh_stl(
         # ASCII STL format
         with path.open("w", encoding="utf-8") as f:
             f.write("solid CT23D_STL_Export\n")
+            bytes_written = len("solid CT23D_STL_Export\n")
             
-            for face in faces:
+            if progress_callback:
+                progress_callback(bytes_written, estimated_total_size)
+            
+            batch_size = max(500, n_faces // 200)  # Update every 0.5% or every 500 faces
+            for i, face in enumerate(faces):
                 # Get triangle vertices
                 v0 = vertices[face[0]]
                 v1 = vertices[face[1]]
@@ -527,8 +586,19 @@ def save_mesh_stl(
                 f.write(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}\n")
                 f.write("    endloop\n")
                 f.write("  endfacet\n")
+                
+                # Estimate bytes written (rough approximation)
+                bytes_written += 100  # Approximate per face
+                
+                # Update progress periodically
+                if progress_callback and (i + 1) % batch_size == 0:
+                    progress_callback(bytes_written, estimated_total_size)
             
             f.write("endsolid CT23D_STL_Export\n")
+            bytes_written += len("endsolid CT23D_STL_Export\n")
+            
+            if progress_callback:
+                progress_callback(estimated_total_size, estimated_total_size)
             
             # Explicitly flush and sync the file to ensure it's written and released on Windows
             f.flush()
@@ -700,11 +770,16 @@ def generate_meshes_for_bins(
             continue
         
         # 5) Extract mesh (with progress callback to prevent freezing)
+        # Update progress during extraction
         def extract_progress_cb(current: int, total: int) -> None:
-            # This helps keep UI responsive during long mesh extractions
+            # Report progress during mesh extraction
             if phase_progress_callback:
-                # Still report overall progress, but extract_mesh is doing its own sub-progress
-                pass
+                # Scale extraction progress to overall progress
+                # We're in phase 2 (extracting), starting at overall_current = total
+                extraction_progress = current / max(total, 1)
+                phase_current_scaled = i + extraction_progress
+                overall_current_scaled = total + phase_current_scaled
+                phase_progress_callback(phase, int(phase_current_scaled), phase_total, overall_total)
         
         verts, faces, colors = extract_mesh(bin_mask_smooth, volume_color, cfg, progress_callback=extract_progress_cb)
         
@@ -789,7 +864,7 @@ def generate_meshes_for_bins(
                     phase_progress_callback(phase, phase_current, phase_total, overall_total)
         
         if format_upper == "STL":
-            save_mesh_stl(out_path, verts, faces, binary=stl_binary)
+            save_mesh_stl(out_path, verts, faces, binary=stl_binary, progress_callback=file_save_progress_cb)
         else:  # PLY format
             save_mesh_ply(out_path, verts, faces, colors, opacity=opacity, progress_callback=file_save_progress_cb)
         outputs.append(out_path)

@@ -244,10 +244,11 @@ class MeshingConfig:
     conservative default suited to full-body scans).
     """
 
-    enable_component_filtering: bool = True
+    enable_component_filtering: bool = False
     """
     If True, remove small connected components smaller than min_component_size.
     If False, skip component filtering (preserves all details, may include noise).
+    Default: False (off) for minimal loss.
     """
 
     smoothing_sigma: float = 1.0
@@ -257,10 +258,26 @@ class MeshingConfig:
     Mirrors '--smoothing-sigma'.
     """
 
-    enable_smoothing: bool = True
+    enable_smoothing: bool = False
     """
     If True, apply Gaussian smoothing to masks before meshing.
     If False, skip smoothing (preserves sharp edges, may create jagged surfaces).
+    Default: False (off) for minimal loss.
+    
+    Note: In combined export mode, smoothing each bin separately can cause boundary
+    misalignment. For best quality in combined mode, consider disabling smoothing or
+    using lower sigma values.
+    """
+    
+    smooth_combined_masks: bool = False
+    """
+    For combined export mode: If True, combine all bin masks before smoothing
+    (then separate for color assignment). This preserves bin boundary alignment
+    but may blur colors at boundaries. If False, smooth each bin separately
+    (may cause boundary gaps/overlaps).
+    
+    Note: This option only applies when exporting as combined file.
+    For separate file export, each bin is always smoothed individually.
     """
 
     # --- Binning ---

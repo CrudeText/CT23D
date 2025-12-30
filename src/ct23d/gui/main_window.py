@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QIcon, QPixmap, QResizeEvent, QShowEvent
+from PySide6.QtGui import QAction, QFont, QIcon, QPixmap, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from .preproc import PreprocessWizard
 from .mesher import MesherWizard
+from .processing3d import Processing3DWizard
 from .status import StatusController
 
 
@@ -71,6 +72,20 @@ class MeshingTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.wizard = MesherWizard(parent=self, status=status)
+        layout.addWidget(self.wizard)
+
+
+class Processing3DTab(QWidget):
+    """
+    Wrapper around the 3D Processing wizard UI.
+    """
+
+    def __init__(self, status: Optional[StatusController], parent: Optional[Widget] = None) -> None:  # type: ignore[name-defined]
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.wizard = Processing3DWizard(parent=self, status=status)
         layout.addWidget(self.wizard)
 
 
@@ -163,6 +178,10 @@ class MainWindow(QMainWindow):
         )
         self.action_save_project.triggered.connect(self.on_save_project)
 
+        self.action_view_nrrd = QAction("View NRRD File…", self)
+        self.action_view_nrrd.setStatusTip("View NRRD file metadata and 3D visualization")
+        self.action_view_nrrd.triggered.connect(self._on_view_nrrd)
+
         self.action_exit = QAction("Exit", self)
         self.action_exit.setStatusTip("Quit CT23D")
         self.action_exit.triggered.connect(self.close)
@@ -173,6 +192,8 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("&File")
         file_menu.addAction(self.action_open_project)
         file_menu.addAction(self.action_save_project)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_view_nrrd)
         file_menu.addSeparator()
         file_menu.addAction(self.action_exit)
 
@@ -294,7 +315,7 @@ class MainWindow(QMainWindow):
                 border: 2px solid #555;
                 border-radius: 5px;
                 margin-top: 10px;
-                padding-top: 10px;
+                padding-top: 5px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -305,7 +326,7 @@ class MainWindow(QMainWindow):
         
         # Create two-column grid layout for more compact display
         patient_info_layout = QGridLayout(self.patient_info_group)
-        patient_info_layout.setContentsMargins(8, 15, 8, 8)
+        patient_info_layout.setContentsMargins(8, 6, 8, 4)  # Reduced bottom margin from 8 to 4
         patient_info_layout.setSpacing(4)
         patient_info_layout.setColumnStretch(0, 1)  # Left column (labels)
         patient_info_layout.setColumnStretch(1, 2)  # Right column (values)
@@ -313,6 +334,9 @@ class MainWindow(QMainWindow):
         # Create labels for patient info fields (will be populated dynamically)
         # We'll create placeholders that will be updated with actual data
         self.patient_info_label = QLabel("No DICOM files loaded")
+        font = QFont()
+        font.setPointSize(8)  # Smaller font size
+        self.patient_info_label.setFont(font)
         self.patient_info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.patient_info_label.setWordWrap(True)
         self.patient_info_label.setStyleSheet("color: gray;")
@@ -321,7 +345,7 @@ class MainWindow(QMainWindow):
         
         # Set initial size - wider but shorter for two-column layout
         self.patient_info_group.setFixedWidth(380)  # Wider for two columns
-        self.patient_info_group.setFixedHeight(140)  # Shorter, more compact
+        self.patient_info_group.setFixedHeight(135)  # Reduced height from 140 to 135 to avoid overlapping Slice Preview
         
         # Ensure it stays on top but doesn't block mouse events from tabs
         self.patient_info_group.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # Allow interactions
@@ -489,11 +513,17 @@ class MainWindow(QMainWindow):
                     ('Modality', 'Modality:'),
                 ]
                 
+                # Use smaller font for patient info labels
+                font = QFont()
+                font.setPointSize(8)  # Smaller font size
+                
                 for key, label_text in fields:
                     if key in patient_info_dict and patient_info_dict[key]:
                         label = QLabel(f"<b>{label_text}</b>")
+                        label.setFont(font)
                         label.setStyleSheet("color: white;")
                         value = QLabel(str(patient_info_dict[key]))
+                        value.setFont(font)
                         value.setStyleSheet("color: white;")
                         value.setWordWrap(True)
                         layout.addWidget(label, row, 0)
@@ -503,11 +533,17 @@ class MainWindow(QMainWindow):
                 if row == 0:
                     # No data found
                     no_data_label = QLabel("DICOM file loaded (no patient info available)")
+                    font = QFont()
+                    font.setPointSize(8)  # Smaller font size
+                    no_data_label.setFont(font)
                     no_data_label.setStyleSheet("color: gray;")
                     layout.addWidget(no_data_label, 0, 0, 1, 2)
             else:
                 # Single message for no data
                 no_data_label = QLabel("No DICOM files loaded")
+                font = QFont()
+                font.setPointSize(8)  # Smaller font size
+                no_data_label.setFont(font)
                 no_data_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
                 no_data_label.setStyleSheet("color: gray;")
                 layout.addWidget(no_data_label, 0, 0, 1, 2)
@@ -521,6 +557,9 @@ class MainWindow(QMainWindow):
                     if item.widget():
                         item.widget().deleteLater()
                 no_data_label = QLabel("No DICOM files loaded")
+                font = QFont()
+                font.setPointSize(8)  # Smaller font size
+                no_data_label.setFont(font)
                 no_data_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
                 no_data_label.setStyleSheet("color: gray;")
                 layout.addWidget(no_data_label, 0, 0, 1, 2)
@@ -551,9 +590,11 @@ class MainWindow(QMainWindow):
 
         self.preproc_tab = PreprocessingTab(status=self.status_controller, parent=self)
         self.meshing_tab = MeshingTab(status=self.status_controller, parent=self)
+        self.processing3d_tab = Processing3DTab(status=self.status_controller, parent=self)
 
         tabs.addTab(self.preproc_tab, "Preprocessing")
         tabs.addTab(self.meshing_tab, "Meshing")
+        tabs.addTab(self.processing3d_tab, "3D Processing")
 
         self.setCentralWidget(tabs)
         
@@ -648,3 +689,10 @@ class MainWindow(QMainWindow):
             "For detailed documentation and usage instructions, please refer to:\n"
             "https://github.com/CrudeText/CT23D",
         )
+    
+    def _on_view_nrrd(self) -> None:
+        """Handle View NRRD File menu action."""
+        from .view_nrrd_dialog import ViewNRRDDialog
+        
+        dialog = ViewNRRDDialog(self)
+        dialog.exec()
