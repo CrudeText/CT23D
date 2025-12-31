@@ -494,10 +494,16 @@ class MainWindow(QMainWindow):
                 return
             
             # Clear existing widgets (except keep the group box)
+            # Remove all items from the layout properly to avoid grid cell conflicts
+            # takeAt() already removes the item from the layout, so we just need to clean up the widget
             while layout.count():
                 item = layout.takeAt(0)
                 if item.widget():
-                    item.widget().deleteLater()
+                    # takeAt() already removed it from layout, just disconnect and delete
+                    widget = item.widget()
+                    widget.setParent(None)  # Disconnect from parent
+                    widget.deleteLater()  # Schedule for deletion
+                # Note: spacer items don't need special handling, they're removed by takeAt()
             
             if patient_info_dict and any(patient_info_dict.values()):
                 # Two-column layout for structured data
@@ -592,9 +598,9 @@ class MainWindow(QMainWindow):
         self.meshing_tab = MeshingTab(status=self.status_controller, parent=self)
         self.processing3d_tab = Processing3DTab(status=self.status_controller, parent=self)
 
-        tabs.addTab(self.preproc_tab, "Preprocessing")
+        tabs.addTab(self.preproc_tab, "Image Processing")
         tabs.addTab(self.meshing_tab, "Meshing")
-        tabs.addTab(self.processing3d_tab, "3D Processing")
+        tabs.addTab(self.processing3d_tab, "3D Preview")
 
         self.setCentralWidget(tabs)
         

@@ -12,7 +12,7 @@ The project is designed to be:
 
 ## Features
 
-### Preprocessing
+### Image Processing (Tab 1)
 - Load raw CT slice images (PNG, JPG, TIFF, DICOM, etc.)
 - **Interactive object selection tools:**
   - Box selection
@@ -125,6 +125,11 @@ The project is designed to be:
     - Binary or ASCII format
     - Geometry only (no colors/opacity support)
     - Widely compatible with 3D software
+  - **NRRD (Nearly Raw Raster Data)** ✓ - Fully implemented
+    - Canonical volume format with spacing and metadata
+    - Gzip compression support
+    - Sidecar JSON for provenance and direction matrices
+    - Compatible with 3D Preview tab for visualization
   - Other formats (OBJ, GLTF) - Planned for future
 - **Export options:**
   - Single file (all bins combined) or multiple files (one per bin)
@@ -132,6 +137,11 @@ The project is designed to be:
   - Export with/without opacity (PLY only)
   - Custom filename prefix
   - STL binary/ASCII format selection
+  - **NRRD export:**
+    - Automatic spacing from UI controls (Z, Y, X in mm)
+    - Provenance metadata (source directory, timestamps, app version)
+    - Intensity bin information preservation
+    - Automatic data type optimization (int16 or float32)
 - **Mesh Processing Options:**
   - **Component Filtering:** Remove small disconnected components (optional)
     - Configurable minimum component size
@@ -140,20 +150,89 @@ The project is designed to be:
     - Configurable smoothing strength (sigma)
     - Creates smoother surfaces but may lose small details
   - **Spacing:** Voxel spacing in mm (Z, Y, X) - configurable per axis
+    - Used for mesh generation and NRRD export
+    - Z height calculation display (number of slices × Z spacing)
 - **File Size Estimation:**
   - Calculate approximate file size before export
   - Shows total size in MB for all files
   - Non-blocking calculation with progress indicator
 - **Progress tracking:**
-  - Phase-aware progress (Building masks, Extracting meshes, Saving files)
+  - Phase-aware progress (Building masks, Extracting meshes, Saving files, Exporting NRRD)
   - Detailed per-phase counters
   - Elapsed time and time remaining
   - File size-based progress for saving phase
   - Cancellable operations with proper cleanup
 
+### 3D Preview (Tab 3)
+- **Load Canonical Volume:**
+  - Load NRRD format volumes exported from the Meshing tab
+  - Displays file path next to load button
+  - Automatic volume metadata extraction and display
+  - Background mesh generation with progress tracking
+- **Volume Info Display:**
+  - Read-only display of volume properties:
+    - Shape (Z, Y, X dimensions)
+    - Data type (int16 or float32)
+    - Spacing (sx, sy, sz in mm)
+    - Intensity kind (HU, HU_float, or raw)
+    - Statistics: Min, Max, Mean intensity values
+  - Compact 2-column layout with reduced spacing
+  - All values are selectable for copy-paste
+- **Mesh Generation Controls:**
+  - **Source selection:** Intensity threshold or Label volume (future)
+  - **Intensity threshold:** Min/Max range selection on separate line (enabled after volume load)
+    - Minimum column width ensures proper value display
+  - **LOD (Level of Detail):** Preview (default), Standard, or High quality
+    - Preview mode for fast loading and smooth interaction
+    - Standard and High modes for detailed visualization
+  - **Smooth shading:** Toggle smooth surface rendering (default: off for better performance)
+  - **Show edges:** Toggle edge visualization (default: off)
+  - Compact 3-row layout: Source, Intensity threshold, and LOD/Shading/Edges
+- **3D Viewer (PyVista):**
+  - Interactive 3D mesh visualization with PyVistaQt
+  - **Advanced transparency rendering:**
+    - Depth peeling enabled for proper transparency handling
+    - Meshes sorted by opacity (most opaque first) for correct rendering
+    - Opaque meshes maintain their color at contact points with transparent meshes
+  - **Viewer controls:**
+    - Reset camera to default view
+    - Toggle axes display
+    - Change background color
+  - Real-time mesh rendering with optimized performance
+  - Thread-safe mesh updates during loading
+  - Incremental mesh addition to prevent UI freezing
+- **Mesh Visibility and Properties Panel:**
+  - **Unified control panel:** Single group box containing table, mesh generation, and apply button
+  - **Per-mesh controls:**
+    - **Visibility checkbox:** Show/hide individual meshes (default: visible)
+      - Changes apply immediately when toggled
+    - **Color display:** Visual representation of bin color
+    - **Intensity range:** Read-only display of min-max intensity values
+    - **Opacity controls:** 
+      - Spinbox (0-100%) with synchronized slider
+      - Bidirectional synchronization between spinbox and slider
+      - Changes tracked but not applied until "Apply Changes" is clicked
+  - **Apply Changes button:**
+    - Applies all pending changes when clicked:
+      - Opacity modifications for all modified meshes
+      - Visibility changes
+      - Mesh generation parameter changes (smooth shading, show edges)
+    - Progress dialog showing progress for each modified mesh
+    - Thread-safe updates with proper PyVista integration
+    - Button enabled only when changes are pending
+  - Large, scrollable table for multiple meshes
+  - Efficient layout with proper column sizing
+- **ML Operations (Placeholder):**
+  - Future functionality for organ mapping and ML-based operations
+  - Placeholder UI for model selection and settings
+
 ### GUI
 - Built with PySide6
 - Fully threaded execution (no UI freezing)
+- **Three main tabs:**
+  - **Image Processing:** Preprocessing and image transformation
+  - **Meshing:** Volume loading, histogram analysis, and mesh export
+  - **3D Preview:** 3D visualization and mesh manipulation
 - **Patient Info Display:**
   - Patient Info box showing DICOM metadata (patient name, ID, birth date, sex, study info)
   - Automatically updates when DICOM files are loaded
@@ -168,7 +247,7 @@ The project is designed to be:
   - Relevant phase information (Loading slices, Building volume, Computing histograms, etc.)
 - **Improved Tab Visibility:**
   - Larger, bolder tabs for better visibility
-  - Clear separation between preprocessing and meshing steps
+  - Clear separation between processing steps
 - **Application Branding:**
   - Application icon (up to 1024px) for taskbar and window title
   - Logo displayed in top right corner (140px height)
@@ -203,14 +282,19 @@ CT23D/
         │   ├── main_window.py
         │   ├── status.py
         │   ├── workers.py
+        │   ├── view_nrrd_dialog.py
         │   │
         │   ├── preproc/
         │   │   └── wizard.py
         │   │
-        │   └── mesher/
-        │       ├── wizard.py
-        │       ├── histogram_3d_view.py
-        │       └── slice_preview.py
+        │   ├── mesher/
+        │   │   ├── wizard.py
+        │   │   ├── histogram_3d_view.py
+        │   │   ├── histogram_tabbed_view.py
+        │   │   └── slice_preview.py
+        │   │
+        │   └── processing3d/
+        │       └── wizard.py
         │
         └── cli/
             ├── preprocess_cli.py
@@ -245,9 +329,9 @@ python scripts/run_ct23d_gui.py
 
 ---
 
-## Preprocessing Workflow
+## Image Processing Workflow
 
-1. Open the Preprocessing tab
+1. Open the Image Processing tab
 2. Select an input directory containing raw CT slices
 3. Select an output directory for processed slices
 4. **Optional: Remove non-grayscale pixels** - Check the option and adjust threshold if needed
@@ -311,25 +395,72 @@ Processed slices are written to the selected output directory. The output direct
    - Adjust minimum component size
    - Enable/disable Gaussian smoothing
    - Adjust smoothing strength (sigma)
-   - Set voxel spacing (X, Y, Z in mm)
+   - Set voxel spacing (Z, Y, X in mm) - used for mesh generation and NRRD export
+   - Z height calculation automatically updates (number of slices × Z spacing)
 7. **Configure export options:**
-   - Format: PLY or STL
+   - Format: PLY, STL, or NRRD
    - File organization: Single file (all bins combined) or Multiple files (one per bin)
    - Export with colors: Enable/disable per-vertex RGB colors (PLY only)
    - Export with opacity: Enable/disable per-vertex alpha channel (PLY only)
    - STL format: Binary or ASCII
+   - **NRRD export:** Enable "Save canonical volume" checkbox
+     - Spacing values from UI are automatically applied
+     - Provenance metadata is included
+     - Can be loaded in 3D Preview tab for visualization
    - Optional: Calculate approximate file size before export
 8. Select an output directory
 9. Set filename prefix (optional)
-10. Click "Export meshes"
+10. Click "Export meshes" or "Export NRRD Volume"
 
-Each enabled bin produces a separate mesh file (or all bins combined into one file, depending on your selection). Meshes include bin colors and optional opacity as configured.
+Each enabled bin produces a separate mesh file (or all bins combined into one file, depending on your selection). Meshes include bin colors and optional opacity as configured. NRRD volumes can be loaded in the 3D Preview tab for interactive visualization.
+
+## 3D Preview Workflow
+
+1. Open the 3D Preview tab
+2. **Load a canonical volume:**
+   - Click "Load Canonical Volume..." button
+   - Select an NRRD file (exported from the Meshing tab)
+   - Volume metadata is automatically displayed in the Volume Info panel
+3. **View volume information:**
+   - Shape, data type, spacing, intensity kind
+   - Min, Max, Mean intensity statistics
+   - All values are selectable for copy-paste
+4. **Generate meshes:**
+   - **Source:** Select "Intensity threshold" (Label volume is planned for future)
+   - **Intensity threshold:** Set Min/Max values on separate line (enabled after volume load)
+   - **LOD:** Choose Preview (default for fast loading), Standard, or High quality
+   - **Smooth shading:** Toggle smooth surface rendering (default: off)
+   - **Show edges:** Toggle edge visualization (default: off)
+   - Click "Generate Mesh" button
+   - Meshes are generated in background and displayed incrementally in the 3D viewer
+   - No UI freezing during mesh generation
+5. **Control mesh visibility:**
+   - Use checkboxes in the "Visible" column to show/hide individual meshes
+   - Changes apply immediately when checkbox is toggled
+   - Hidden meshes are properly removed from the viewer
+6. **Adjust mesh properties:**
+   - **Opacity:** Use spinboxes (0-100%) or synchronized sliders for each mesh
+     - Spinbox and slider are bidirectionally synchronized
+     - Changes are tracked but not applied until "Apply Changes" is clicked
+   - **Smooth shading:** Toggle in Mesh Generation controls
+   - **Show edges:** Toggle in Mesh Generation controls
+   - All changes (opacity, visibility, mesh generation parameters) wait for "Apply Changes" button
+   - Click "Apply Changes" button to apply all pending modifications
+   - Progress dialog shows progress for each modified mesh
+   - Button is enabled only when changes are pending
+7. **3D Viewer controls:**
+   - **Reset Camera:** Return to default viewing angle
+   - **Toggle Axes:** Show/hide coordinate axes
+   - **Background Color:** Change viewer background color
+   - Interactive rotation, zoom, and pan with mouse
+   - Proper transparency rendering with depth peeling
+   - Opaque meshes maintain their appearance when touching transparent meshes
 
 ---
 
 ## Output
 
-### Preprocessing Output
+### Image Processing Output
 - Clean, processed slice images
 - Non-grayscale pixels removed (if enabled, from specified slice ranges)
 - Selected objects removed from all slices or specified slice ranges
@@ -347,6 +478,12 @@ Each enabled bin produces a separate mesh file (or all bins combined into one fi
   - **STL (Stereolithography):**
     - Binary or ASCII format
     - Geometry only (no colors/opacity)
+  - **NRRD (Nearly Raw Raster Data):**
+    - Canonical volume format with spacing metadata
+    - Gzip compression (default)
+    - Sidecar JSON file with provenance and direction matrices
+    - Filename format: `{prefix}_volume.nrrd` (or custom path)
+    - Compatible with 3D Preview tab for visualization
 - **File organization:**
   - **Multiple files:** One file per enabled bin
     - PLY filename format: `{prefix}_bin_{id:02d}_{low}_{high}.ply`
@@ -356,13 +493,17 @@ Each enabled bin produces a separate mesh file (or all bins combined into one fi
     - PLY filename format: `{prefix}_combined.ply`
     - STL filename format: `{prefix}_combined.stl`
     - Example: `ct_layer_combined.ply` or `ct_layer_combined.stl`
+  - **NRRD:** Single volume file with all intensity data
+    - Includes spacing (Z, Y, X in mm) from UI settings
+    - Includes provenance metadata (source, timestamps, bins, etc.)
 - **Features:**
-  - Integer intensity values in filenames
+  - Integer intensity values in filenames (for PLY/STL)
   - Component filtering applied (if enabled)
   - Gaussian smoothing applied (if enabled)
+  - Spacing metadata preserved in NRRD format
 
-![3D Render Example](./images/blender_3D_redner_example.png)
-*Example 3D mesh rendered in Blender with color-coded intensity values*
+![3D Preview](./images/3D_Preview_example.png)
+*3D Preview tab with interactive mesh visualization, opacity controls, and mesh generation tools*
 
 ---
 
@@ -395,9 +536,11 @@ Each enabled bin produces a separate mesh file (or all bins combined into one fi
 
 ## Roadmap
 
-- Additional mesh export formats (OBJ, STL, GLTF/GLB, FBX)
+- Additional mesh export formats (OBJ, GLTF/GLB, FBX)
 - Preset-based workflows (bone, soft tissue, etc.)
-- Volume preview (orthogonal slice views)
+- Volume preview (orthogonal slice views) in 3D Preview tab
+- Label volume support for mesh generation in 3D Preview tab
+- ML-based organ mapping and segmentation in 3D Preview tab
 - Batch and headless processing
 - Extended documentation and examples
 - Advanced mask propagation algorithms

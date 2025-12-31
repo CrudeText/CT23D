@@ -353,6 +353,12 @@ def prepare_volume_data_for_canonical(
         If prefer_int16 is True and data doesn't fit in int16 range.
         The error message will indicate that float32 should be used instead.
     """
+    # Handle uint8 data specially - direct cast to int16 corrupts values >127
+    # uint8 (0-255) should be converted to float32 to preserve all values
+    if data.dtype == np.uint8:
+        # uint8 data: convert to float32 to preserve all values (0-255)
+        return data.astype(np.float32), "HU_float"
+    
     data_min = float(data.min())
     data_max = float(data.max())
     
@@ -362,7 +368,25 @@ def prepare_volume_data_for_canonical(
     
     if data_min >= int16_min and data_max <= int16_max:
         # Fits in int16 - convert to int16
-        return data.astype(np.int16), "HU"
+        # For uint16, we need to check if values exceed int16 max (32767)
+        # If uint16 data has values > 32767, it won't fit in int16
+        if data.dtype == np.uint16 and data_max > 32767:
+            # uint16 data exceeds int16 range - convert to float32
+            if prefer_int16:
+                raise ValueError(
+                    f"Volume data range [{data_min:.2f}, {data_max:.2f}] exceeds int16 range "
+                    f"[{int16_min}, {int16_max}]. Cannot use int16 dtype. "
+                    f"Please confirm use of float32 dtype instead."
+                )
+            else:
+                return data.astype(np.float32), "HU_float"
+        else:
+            # Properly convert to int16 (handles signed integers correctly)
+            # For uint16 with values <= 32767, convert via int32 to preserve values
+            if data.dtype == np.uint16:
+                return data.astype(np.int32).astype(np.int16), "HU"
+            else:
+                return data.astype(np.int16), "HU"
     else:
         # Doesn't fit in int16
         if prefer_int16:
@@ -487,11 +511,17 @@ def save_volume_nrrd(volume: CanonicalVolume, path: str | Path) -> None:
     
     # Spacing: NRRD uses space directions, but also supports spacing
     # NRRD spacing is in (x, y, z) order, which matches our spacing tuple
+    # volume.spacing is (sx, sy, sz) in physical space (x, y, z)
     sx, sy, sz = volume.spacing
+    # After transposing data from (Z, Y, X) to (X, Y, Z), the space directions
+    # matrix rows correspond to the new dimension order:
+    # - First row [sx, 0, 0] applies to X dimension (first in transposed data)
+    # - Second row [0, sy, 0] applies to Y dimension (second in transposed data)
+    # - Third row [0, 0, sz] applies to Z dimension (third in transposed data)
     header['space directions'] = [
-        [sx, 0, 0],
-        [0, sy, 0],
-        [0, 0, sz]
+        [sx, 0, 0],  # X dimension spacing
+        [0, sy, 0],  # Y dimension spacing
+        [0, 0, sz]   # Z dimension spacing
     ]
     
     # Origin: NRRD uses space origin in (x, y, z) order

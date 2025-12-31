@@ -77,18 +77,35 @@ class MesherWizard(QWidget):
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
 
-        # Top: processed directory selector (button on left, label on right)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)  # Small spacing between button and label
-        self.btn_select_processed = QPushButton("Select Folder (or use default)")
-        self.btn_select_processed.setMaximumWidth(180)  # Smaller button
+        # ------------------------------------------------------------------
+        # Input directory selector (button and label on same line)
+        # ------------------------------------------------------------------
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)  # Small spacing between button and label
+        self.btn_select_processed = QPushButton("Select Input Folder")
+        self.btn_select_processed.setMaximumWidth(150)  # Smaller button
         self.btn_select_processed.clicked.connect(self._on_select_processed_dir)
-        top_row.addWidget(self.btn_select_processed)
+        row1.addWidget(self.btn_select_processed)
         self.processed_label = QLabel("Processed slices directory: (none)")
         self.processed_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        top_row.addWidget(self.processed_label)
-        top_row.addStretch()  # Push everything to the left
-        main_layout.addLayout(top_row)
+        row1.addWidget(self.processed_label)
+        row1.addStretch()  # Push everything to the left
+        main_layout.addLayout(row1)
+
+        # ------------------------------------------------------------------
+        # Output directory selector (button and label on same line)
+        # ------------------------------------------------------------------
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)  # Small spacing between button and label
+        self.btn_select_output = QPushButton("Select Output Folder")
+        self.btn_select_output.setMaximumWidth(150)  # Smaller button
+        self.btn_select_output.clicked.connect(self._on_select_output_dir)
+        row2.addWidget(self.btn_select_output)
+        self.output_label = QLabel("Output directory: (none)")
+        self.output_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row2.addWidget(self.output_label)
+        row2.addStretch()  # Push everything to the left
+        main_layout.addLayout(row2)
 
         # 3D Histogram + bin table + preview
         middle_layout = QHBoxLayout()
@@ -236,15 +253,6 @@ class MesherWizard(QWidget):
 
         main_layout.addLayout(middle_layout)
 
-        # Output directory
-        out_row = QHBoxLayout()
-        self.output_label = QLabel("Output directory: (none)")
-        self.btn_select_output = QPushButton("Select Output Folder")
-        self.btn_select_output.clicked.connect(self._on_select_output_dir)
-        out_row.addWidget(self.output_label, stretch=1)
-        out_row.addWidget(self.btn_select_output)
-        main_layout.addLayout(out_row)
-
         # Filename prefix
         prefix_row = QHBoxLayout()
         prefix_row.addWidget(QLabel("Filename prefix:"))
@@ -259,9 +267,9 @@ class MesherWizard(QWidget):
         processing_group = QGroupBox("Mesh Processing Options")
         processing_layout = QVBoxLayout(processing_group)
         
-        # Spacing (voxel size in mm)
+        # Spacing (pixel/slice size in mm)
         spacing_row = QHBoxLayout()
-        spacing_row.addWidget(QLabel("Voxel spacing (mm):"))
+        spacing_row.addWidget(QLabel("Pixel spacing (mm):"))
         spacing_row.addWidget(QLabel("Z:"))
         self.spin_spacing_z = QDoubleSpinBox()
         self.spin_spacing_z.setRange(0.0, 100.0)
@@ -272,7 +280,7 @@ class MesherWizard(QWidget):
         self.spin_spacing_z.valueChanged.connect(self._update_z_height)  # Update Z height when changed
         spacing_row.addWidget(self.spin_spacing_z)
         
-        # Z height calculation label (number of slices × voxel spacing)
+        # Z height calculation label (number of slices × pixel spacing)
         self.z_height_label = QLabel("Z height: —")
         self.z_height_label.setStyleSheet("font-weight: bold;")
         spacing_row.addWidget(QLabel("|"))
@@ -1490,7 +1498,7 @@ class MesherWizard(QWidget):
         )
     
     def _update_z_height(self) -> None:
-        """Update the Z height calculation display (number of slices × voxel spacing)."""
+        """Update the Z height calculation display (number of slices × pixel spacing)."""
         if self._num_slices > 0 and hasattr(self, 'spin_spacing_z'):
             z_spacing = self.spin_spacing_z.value()
             z_height = self._num_slices * z_spacing

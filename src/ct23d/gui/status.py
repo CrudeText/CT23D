@@ -103,6 +103,7 @@ class StatusController(QObject):
         is_loading_nrrd = ("loading canonical volume" in title_lower or ("loading" in title_lower and "nrrd" in title_lower)) and not is_loading_with_mesh
         is_loading_volume = ("loading volume" in title_lower or "loading image" in title_lower) and not is_loading_nrrd and not is_loading_with_mesh
         is_nrrd_export = "exporting" in title_lower and ("nrrd" in title_lower or "volume" in title_lower)
+        is_applying_opacity = "applying opacity" in title_lower or "opacity changes" in title_lower
         
         if is_file_size:
             # File size calculation: simple single phase
@@ -156,11 +157,20 @@ class StatusController(QObject):
                 "Building volume": "Building volume",
                 "Computing histograms": "Computing histograms"
             }
+        elif is_applying_opacity:
+            # Applying opacity changes to meshes in 3D Preview tab
+            # The phase name may include mesh number, so use a pattern match
+            all_phases = ["Applying opacity changes"]
+            phase_names = {
+                "Applying opacity changes": "Applying opacity changes",
+                # Also handle phase names with mesh numbers
+                "Applying opacity changes (mesh": "Applying opacity changes"
+            }
         else:
             all_phases = ["loading", "processing", "saving"]
             phase_names = {
                 "loading": "Loading images",
-                "processing": "Processing volume",
+                "processing": "Processing slices",
                 "saving": "Saving slices"
             }
         
@@ -229,7 +239,11 @@ class StatusController(QObject):
             else:
                 status_lines = []
                 for p in all_phases:
-                    p_name = phase_names.get(p, p.capitalize())
+                    # For "Applying opacity changes", use the actual phase name which may include mesh number
+                    if is_applying_opacity and phase.startswith(p):
+                        p_name = phase  # Use the full phase name with mesh number
+                    else:
+                        p_name = phase_names.get(p, p.capitalize())
                     if completed_phases.get(p, False):
                         # Show file size info for completed "Saving files" phase
                         if p == "Saving files" and estimated_file_size and actual_bytes_written > 0:
@@ -247,7 +261,7 @@ class StatusController(QObject):
                                 status_lines.append(f"✓ {p_name}: Complete")
                         else:
                             status_lines.append(f"✓ {p_name}: Complete")
-                    elif p == phase and phase_total > 0:
+                    elif (p == phase or phase.startswith(p)) and phase_total > 0:
                         # Show current progress with file size info if available
                         if p == "Saving files" and estimated_file_size:
                             try:
@@ -262,6 +276,9 @@ class StatusController(QObject):
                                 status_lines.append(f"→ {p_name}: {format_file_size(current)} / {format_file_size(phase_total)}")
                             except Exception:
                                 status_lines.append(f"→ {p_name}: {current} / {phase_total}")
+                        # For applying opacity, show mesh number in the phase name
+                        elif is_applying_opacity:
+                            status_lines.append(f"→ {p_name}")
                         else:
                             status_lines.append(f"→ {p_name}: {current} / {phase_total}")
                     else:
@@ -269,15 +286,8 @@ class StatusController(QObject):
                 
                 status_text = "\n".join(status_lines)
             
-            # Calculate estimated time remaining for current phase
-            if current > 0 and phase_total > 0 and state["phase_start_time"] is not None:
-                phase_elapsed = time.time() - state["phase_start_time"]
-                estimated_phase_total = phase_elapsed * phase_total / current if current > 0 else 0
-                phase_remaining = max(0, estimated_phase_total - phase_elapsed)
-                remaining_str = format_time(phase_remaining)
-                status_text += f"\n\nElapsed: {elapsed_str} | Remaining: ~{remaining_str}"
-            else:
-                status_text += f"\n\nElapsed: {elapsed_str}"
+            # Show elapsed time only (removed remaining time estimate)
+            status_text += f"\n\nElapsed: {elapsed_str}"
             
             dialog.setLabelText(status_text)
         
@@ -324,14 +334,19 @@ class StatusController(QObject):
             
             # Update progress bar with overall progress
             # For "Saving files" phase, progress is handled by bytes_written signal
+            # Note: When both phase_progress and progress signals are emitted (as with VolumeLoadWorker),
+            # the progress signal already has the correct overall value, so we should not override it here.
+            # The phase_progress signal is primarily for displaying phase information in the label.
+            # Only update the value here for single-phase operations (overall_total == phase_total)
+            # or when we're certain the calculation is correct.
             if phase != "Saving files" or not estimated_file_size:
-                if overall_total > phase_total:
-                    # Multi-phase: calculate overall progress
-                    completed_progress = overall_total - phase_total  # Previous phases
-                    dialog.setValue(completed_progress + current)
-                else:
-                    # Single phase or first phase
+                # For multi-phase operations where overall_total > phase_total, the progress signal
+                # emitted by the worker already has the correct value, so we don't override it here.
+                # Only set value for single-phase operations.
+                if overall_total <= phase_total:
+                    # Single phase: current is the correct overall progress
                     dialog.setValue(current)
+                # else: Multi-phase - let on_progress handler set the value (it has the correct value)
             
             # Update display (timer will also update it, but this ensures immediate update)
             update_timer_display()

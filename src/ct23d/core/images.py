@@ -1227,3 +1227,397 @@ def preprocess_volume_rgb(
         processed.append(cleaned)
 
     return np.stack(processed, axis=0)
+
+
+# -------------------------------------------------------------------------
+# Non-body removal (body mask computation)
+# -------------------------------------------------------------------------
+
+def get_dicom_hu_conversion(path: Path) -> Optional[tuple[float, float]]:
+    """
+    Get RescaleSlope and RescaleIntercept from a DICOM file for HU conversion.
+    
+    HU = pixel_value * RescaleSlope + RescaleIntercept
+    
+    Parameters
+    ----------
+    path : Path
+        Path to DICOM file
+        
+    Returns
+    -------
+    Optional[tuple[float, float]]
+        (RescaleSlope, RescaleIntercept) if available, None otherwise
+    """
+    if not HAS_PYDICOM or not _is_dicom_file(path):
+        return None
+    
+    try:
+        ds = pydicom.dcmread(str(path), stop_before_pixels=True)
+        slope = getattr(ds, 'RescaleSlope', None)
+        intercept = getattr(ds, 'RescaleIntercept', None)
+        if slope is not None and intercept is not None:
+            return (float(slope), float(intercept))
+    except Exception:
+        pass
+    return None
+
+
+def compute_body_mask_2d(
+    slice_gray: np.ndarray,
+    body_threshold: float,
+    closing_radius_px: float = 8.0,
+    min_component_size_px: int = 1000,
+    outside_only: bool = True,
+    center_of_mass_threshold: float = 0.6,
+) -> np.ndarray:
+    """
+    Compute 2D body mask for a single slice.
+    
+    Parameters
+    ----------
+    slice_gray : np.ndarray
+        Grayscale slice image, shape (Y, X), any numeric dtype
+    body_threshold : float
+        Intensity threshold for body tissue (in HU if available, otherwise raw intensity)
+    closing_radius_px : float
+        Closing radius in pixels for morphological operations
+    min_component_size_px : int
+        Minimum size of connected components to keep (in pixels)
+    outside_only : bool
+        If True, only remove pixels outside the body (flood fill from borders)
+        If False, remove all non-body pixels
+    
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape (Y, X), True = body tissue
+    """
+    from scipy import ndimage
+    from skimage import measure, morphology
+    
+    # Convert to float32 for processing
+    gray_float = slice_gray.astype(np.float32)
+    
+    # Threshold to get body mask (body = intensities >= threshold)
+    body_mask = gray_float >= body_threshold
+    
+    # Morphological closing to fill small gaps
+    if closing_radius_px > 0:
+        disk = morphology.disk(max(1, int(round(closing_radius_px))))
+        body_mask = morphology.binary_closing(body_mask, disk)
+    
+    # Remove small objects first
+    if min_component_size_px > 0:
+        body_mask = morphology.remove_small_objects(body_mask, min_size=min_component_size_px)
+    
+    # Identify and exclude bedrest (large component in bottom region)
+    # This helps when bedrest is connected to the body
+    # Use more aggressive criteria for better consistency across slices
+    if np.sum(body_mask) > 0:
+        labeled = measure.label(body_mask, connectivity=2)
+        h, w = body_mask.shape
+        bottom_region_start = h - int(h * 0.35)  # Bottom 35% of image
+        
+        # Find components that are primarily in the bottom region
+        for label_id in np.unique(labeled[labeled > 0]):
+            component_mask = (labeled == label_id)
+            component_pixels = np.sum(component_mask)
+            bottom_pixels = np.sum(component_mask[bottom_region_start:h, :])
+            
+            # Lower threshold for bedrest detection (45% instead of 50%) for consistency
+            if component_pixels > min_component_size_px * 1.5:  # Moderate-large component
+                bottom_ratio = bottom_pixels / component_pixels if component_pixels > 0 else 0
+                if bottom_ratio > 0.45:  # More than 45% in bottom region
+                    # Check if it's also close to bottom edge (strong indicator of bedrest)
+                    # Use last 30 pixels (or 5% of height, whichever is larger) for edge detection
+                    edge_height = max(30, int(h * 0.05))
+                    bottom_edge_pixels = np.sum(component_mask[(h - edge_height):h, :])
+                    if bottom_edge_pixels > component_pixels * 0.15:  # At least 15% on bottom edge (lowered from 20%)
+                        # Remove this component (likely bedrest)
+                        body_mask[component_mask] = False
+    
+    # Now identify the main body component and preserve connected body parts
+    # Instead of just keeping the largest, we keep components that are likely body parts
+    if np.sum(body_mask) > 0:
+        labeled = measure.label(body_mask, connectivity=2)
+        if labeled.max() > 0:
+            # Find the largest component (main body)
+            largest_label = 0
+            largest_size = 0
+            component_info = {}
+            for label_id in np.unique(labeled[labeled > 0]):
+                component_mask = (labeled == label_id)
+                size = np.sum(component_mask)
+                y_coords, x_coords = np.where(component_mask)
+                if len(y_coords) > 0:
+                    y_min, y_max = y_coords.min(), y_coords.max()
+                    x_min, x_max = x_coords.min(), x_coords.max()
+                    y_center = np.mean(y_coords)
+                    x_center = np.mean(x_coords)
+                    component_info[label_id] = {
+                        'size': size,
+                        'y_min': y_min,
+                        'y_max': y_max,
+                        'x_min': x_min,
+                        'x_max': x_max,
+                        'y_center': y_center,
+                        'x_center': x_center,
+                    }
+                if size > largest_size:
+                    largest_size = size
+                    largest_label = label_id
+            
+            if largest_label > 0:
+                # Keep the largest component (main body)
+                main_body = component_info[largest_label]
+                body_mask = (labeled == largest_label)
+                
+                # Also keep other components that are likely body parts (limbs, hands, feet)
+                # Components are considered body parts if they:
+                # 1. Are within vertical range of main body (legs, arms extending down/up)
+                # 2. Are horizontally near main body (arms/hands extending sideways)
+                # 3. Are not too small relative to main body (at least 1% of main body size)
+                # 4. Are not in suspicious locations (very bottom edge, far from body)
+                
+                main_y_range = (main_body['y_min'], main_body['y_max'])
+                main_x_range = (main_body['x_min'], main_body['x_max'])
+                
+                for label_id, info in component_info.items():
+                    if label_id == largest_label:
+                        continue
+                    
+                    # Check if component is vertically aligned with main body
+                    # (within extended range to include limbs)
+                    y_overlap = (info['y_max'] >= main_y_range[0] - int(h * 0.1) and 
+                                info['y_min'] <= main_y_range[1] + int(h * 0.1))
+                    
+                    # Check if component is horizontally near main body
+                    # (within extended range to include extended arms/hands)
+                    x_overlap = (info['x_max'] >= main_x_range[0] - int(w * 0.15) and 
+                                info['x_min'] <= main_x_range[1] + int(w * 0.15))
+                    
+                    # If vertically aligned OR horizontally near, likely a body part
+                    if y_overlap or x_overlap:
+                        # Additional check: avoid components at very bottom edge that are small
+                        # (likely bedrest remnants)
+                        bottom_edge_y = h - max(20, int(h * 0.05))
+                        is_near_bottom_edge = info['y_max'] >= bottom_edge_y
+                        is_small = info['size'] < largest_size * 0.02  # Less than 2% of main body
+                        
+                        # Only exclude if it's at bottom edge AND small AND not horizontally aligned with body
+                        # (this preserves hand tips at side edges that might be small)
+                        if is_near_bottom_edge and is_small and not x_overlap:
+                            # Likely bedrest remnant at bottom, skip it
+                            continue
+                        
+                        # Keep this component (likely a body part, including small hand tips)
+                        body_mask = body_mask | (labeled == label_id)
+                    
+                    # Also keep very small components at side edges if they're horizontally aligned
+                    # (hand tips that extend to edges but are very small)
+                    elif x_overlap:
+                        # Component is horizontally aligned but maybe not vertically
+                        # If it's small and at side edge, might be a hand tip - preserve it
+                        is_at_side_edge = (info['x_min'] <= int(w * 0.05) or 
+                                          info['x_max'] >= w - int(w * 0.05))
+                        is_very_small = info['size'] < largest_size * 0.01  # Less than 1% of main body
+                        
+                        if is_at_side_edge and is_very_small:
+                            # Likely a hand tip at edge - preserve it
+                            body_mask = body_mask | (labeled == label_id)
+            
+            # Additional check: if the body has a very large bottom portion that might be bedrest,
+            # try to remove it (helps when bedrest is connected to body)
+            # Use conservative criteria to avoid removing legs
+            component_mask = body_mask.copy()
+            h, w = component_mask.shape
+            bottom_region_start = h - int(h * 0.35)  # Bottom 35% of image (more conservative)
+            bottom_pixels = np.sum(component_mask[bottom_region_start:h, :])
+            total_pixels = np.sum(component_mask)
+            
+            # Only remove if a very large portion (55%+) is in bottom region (more conservative than 45%)
+            # This makes it less likely to remove legs
+            if total_pixels > 0 and bottom_pixels > total_pixels * 0.55:
+                y_coords, x_coords = np.where(component_mask)
+                if len(y_coords) > 0:
+                    # Calculate vertical center of mass
+                    y_center = np.mean(y_coords)
+                    # Only remove if center of mass is very low (lower portion of image)
+                    # This helps preserve legs which have a higher center of mass
+                    # center_of_mass_threshold of 0.6 means center must be in lower 40% of image
+                    # Use a slightly higher threshold (0.65) to be more conservative
+                    conservative_threshold = max(center_of_mass_threshold, 0.65)
+                    if y_center > h * conservative_threshold:
+                        # Try to remove bottom portion that's likely bedrest
+                        # But only if we still have a reasonable body mask left
+                        temp_mask = body_mask.copy()
+                        # Remove bottom 30% (more conservative than 35% to preserve more body/legs)
+                        temp_bottom_start = h - int(h * 0.3)
+                        temp_mask[temp_bottom_start:h, :] = False
+                        
+                        # Check if we still have a substantial body mask
+                        if np.sum(temp_mask) > min_component_size_px:
+                            # Re-select largest component
+                            labeled = measure.label(temp_mask, connectivity=2)
+                            if labeled.max() > 0:
+                                largest_label = 0
+                                largest_size_new = 0
+                                for label_id in np.unique(labeled[labeled > 0]):
+                                    size = np.sum(labeled == label_id)
+                                    if size > largest_size_new:
+                                        largest_size_new = size
+                                        largest_label = label_id
+                                # Only use the new mask if we still have a reasonable body
+                                # (at least 40% of original size - more conservative than 30%)
+                                if largest_size_new > min_component_size_px and largest_size_new > total_pixels * 0.4:
+                                    body_mask = (labeled == largest_label)
+    
+    # If outside_only, perform flood fill from borders to remove external air
+    # Be careful to avoid removing body parts at edges (legs, hands, etc.)
+    if outside_only and np.sum(body_mask) > 0:
+        # Create inverse mask (non-body)
+        non_body_mask = ~body_mask
+        
+        # Flood fill from border pixels, but be selective to preserve body parts at edges
+        h, w = body_mask.shape
+        filled = np.zeros_like(body_mask, dtype=bool)
+        
+        # Fill from bottom edge (most likely to be bedrest/external)
+        # Be very conservative - only fill from bottom 5% to avoid removing legs
+        bottom_fill_start = max(0, h - max(5, int(h * 0.05)))
+        for y in range(bottom_fill_start, h):
+            for x in range(w):
+                if non_body_mask[y, x] and not filled[y, x]:
+                    # Flood fill this region
+                    seed_mask = np.zeros_like(body_mask, dtype=bool)
+                    seed_mask[y, x] = True
+                    region = ndimage.binary_propagation(seed_mask, mask=non_body_mask)
+                    filled = filled | region
+        
+        # Fill from top edge (typically no body parts)
+        for x in range(w):
+            if non_body_mask[0, x] and not filled[0, x]:
+                seed_mask = np.zeros_like(body_mask, dtype=bool)
+                seed_mask[0, x] = True
+                region = ndimage.binary_propagation(seed_mask, mask=non_body_mask)
+                filled = filled | region
+        
+        # Fill from side edges, but be very conservative - only from very top corners
+        # Don't fill from side edges at all to preserve hands/arms that extend to edges
+        # Only fill from top corners (first few pixels of top-left and top-right corners)
+        corner_limit = max(1, min(3, int(h * 0.02)))  # Top 2% or 3 pixels, whichever is smaller
+        for x in [0, w - 1]:
+            for y in range(corner_limit):
+                if non_body_mask[y, x] and not filled[y, x]:
+                    seed_mask = np.zeros_like(body_mask, dtype=bool)
+                    seed_mask[y, x] = True
+                    region = ndimage.binary_propagation(seed_mask, mask=non_body_mask)
+                    filled = filled | region
+        
+        # Body is the inverse of filled external regions
+        body_mask = ~filled
+    
+    return body_mask
+
+
+def compute_body_mask_3d(
+    volume_gray: np.ndarray,
+    spacing: tuple[float, float, float],
+    body_threshold: float,
+    closing_radius_mm: float = 8.0,
+    min_component_size_vox: int = 1000,
+    outside_only: bool = True,
+) -> np.ndarray:
+    """
+    Compute 3D body mask for a volume.
+    
+    Parameters
+    ----------
+    volume_gray : np.ndarray
+        Grayscale volume, shape (Z, Y, X), any numeric dtype
+    spacing : tuple[float, float, float]
+        Voxel spacing in mm as (sx, sy, sz) in physical space order
+        Note: volume is in (Z, Y, X) order, spacing is (x, y, z)
+    body_threshold : float
+        Intensity threshold for body tissue (in HU if available, otherwise raw intensity)
+    closing_radius_mm : float
+        Closing radius in millimeters for morphological operations
+    min_component_size_vox : int
+        Minimum size of connected components to keep (in voxels)
+    outside_only : bool
+        If True, only remove pixels outside the body (flood fill from borders)
+        If False, remove all non-body pixels
+    
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape (Z, Y, X), True = body tissue
+    """
+    from scipy import ndimage
+    from skimage import measure, morphology
+    
+    # Convert to float32 for processing
+    gray_float = volume_gray.astype(np.float32)
+    
+    # Threshold to get body mask (body = intensities >= threshold)
+    body_mask = gray_float >= body_threshold
+    
+    # Convert closing radius from mm to voxels using spacing
+    # Use average of Y and X spacing (slice plane spacing)
+    slice_spacing_avg = (spacing[1] + spacing[2]) / 2.0  # (sy + sx) / 2
+    closing_radius_px = closing_radius_mm / slice_spacing_avg if slice_spacing_avg > 0 else closing_radius_mm
+    
+    # Morphological closing to fill small gaps (2D per slice, faster than 3D)
+    if closing_radius_px > 0:
+        disk = morphology.disk(max(1, int(round(closing_radius_px))))
+        for z_idx in range(body_mask.shape[0]):
+            body_mask[z_idx] = morphology.binary_closing(body_mask[z_idx], disk)
+    
+    # Keep only the largest connected component (the body) - use 3D connectivity
+    if min_component_size_vox > 0:
+        body_mask = morphology.remove_small_objects(body_mask, min_size=min_component_size_vox, connectivity=3)
+    
+    # If outside_only, perform 3D flood fill from borders to remove external air
+    if outside_only and np.sum(body_mask) > 0:
+        # Create inverse mask (non-body)
+        non_body_mask = ~body_mask
+        
+        # Flood fill from all border voxels (3D)
+        z_max, y_max, x_max = body_mask.shape
+        filled = np.zeros_like(body_mask, dtype=bool)
+        
+        # Fill from Z borders (top and bottom slices)
+        for z in [0, z_max - 1]:
+            for y in range(y_max):
+                for x in range(x_max):
+                    if non_body_mask[z, y, x] and not filled[z, y, x]:
+                        seed_mask = np.zeros_like(body_mask, dtype=bool)
+                        seed_mask[z, y, x] = True
+                        region = ndimage.binary_propagation(seed_mask, mask=non_body_mask)
+                        filled = filled | region
+        
+        # Fill from Y borders (front and back)
+        for z in range(z_max):
+            for y in [0, y_max - 1]:
+                for x in range(x_max):
+                    if non_body_mask[z, y, x] and not filled[z, y, x]:
+                        seed_mask = np.zeros_like(body_mask, dtype=bool)
+                        seed_mask[z, y, x] = True
+                        region = ndimage.binary_propagation(seed_mask, mask=non_body_mask)
+                        filled = filled | region
+        
+        # Fill from X borders (left and right)
+        for z in range(z_max):
+            for y in range(y_max):
+                for x in [0, x_max - 1]:
+                    if non_body_mask[z, y, x] and not filled[z, y, x]:
+                        seed_mask = np.zeros_like(body_mask, dtype=bool)
+                        seed_mask[z, y, x] = True
+                        region = ndimage.binary_propagation(seed_mask, mask=non_body_mask)
+                        filled = filled | region
+        
+        # Body is the inverse of filled external regions
+        body_mask = ~filled
+    
+    return body_mask

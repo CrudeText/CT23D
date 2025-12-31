@@ -129,6 +129,124 @@ def preprocess_slices(
                         # Set pixels outside the crop mask to black
                         volume_rgb[z_idx][~keep_mask] = [0, 0, 0]
     
+    # Apply non-body removal if specified (3D body mask computation)
+    if cfg.non_body_removal_objects:
+        for non_body_obj in cfg.non_body_removal_objects:
+            slice_min = non_body_obj.get('slice_min', 0)
+            slice_max = non_body_obj.get('slice_max', len(volume_rgb) - 1)
+            params = non_body_obj.get('parameters', {})
+            
+            # Clamp slice range to valid bounds
+            slice_min = max(0, min(slice_min, len(volume_rgb) - 1))
+            slice_max = max(slice_min, min(slice_max, len(volume_rgb) - 1))
+            
+            # Convert RGB volume to grayscale for body mask computation
+            if volume_rgb.ndim == 4 and volume_rgb.shape[3] == 3:
+                # Use max channel (better for medical imaging)
+                volume_gray = np.max(volume_rgb, axis=3)
+            else:
+                volume_gray = volume_rgb
+            
+            # Try to get spacing from DICOM files, otherwise use default
+            spacing = (1.0, 1.0, 1.0)  # Default: (sz, sy, sx) in mm
+            if slice_paths:
+                try:
+                    first_path = slice_paths[0]
+                    if images._is_dicom_file(first_path):
+                        # Try to get spacing from DICOM
+                        try:
+                            import pydicom
+                            ds = pydicom.dcmread(str(first_path), stop_before_pixels=True)
+                            if hasattr(ds, 'PixelSpacing') and ds.PixelSpacing is not None:
+                                pixel_spacing = ds.PixelSpacing
+                                if len(pixel_spacing) >= 2:
+                                    spacing_y = float(pixel_spacing[0])
+                                    spacing_x = float(pixel_spacing[1])
+                                    # Try to get slice thickness
+                                    spacing_z = 1.0
+                                    if hasattr(ds, 'SliceThickness') and ds.SliceThickness is not None:
+                                        spacing_z = float(ds.SliceThickness)
+                                    spacing = (spacing_z, spacing_y, spacing_x)  # (sz, sy, sx)
+                        except Exception:
+                            pass  # Use default spacing
+                except Exception:
+                    pass  # Use default spacing
+            
+            # Get parameters
+            body_threshold_hu = params.get('body_threshold_hu', -300.0)
+            closing_radius_mm = params.get('closing_radius_mm', 8.0)
+            min_component_size_vox = params.get('min_component_size_vox', 1000)
+            outside_only = params.get('outside_only', True)
+            background_fill_hu = params.get('background_fill', -1024.0)
+            
+            # Try to convert HU values to raw intensity if DICOM
+            # Get HU conversion parameters if available
+            hu_conv = None
+            if slice_paths:
+                try:
+                    first_path = slice_paths[0]
+                    if images._is_dicom_file(first_path):
+                        hu_conv = images.get_dicom_hu_conversion(first_path)
+                except Exception:
+                    pass
+            
+            # Convert body_threshold from HU to raw intensity if needed
+            if hu_conv is not None:
+                # DICOM with HU conversion available - use HU threshold directly
+                body_threshold = body_threshold_hu
+            else:
+                # No HU conversion - convert HU threshold to approximate raw intensity
+                if body_threshold_hu < 0:
+                    body_threshold = 200.0  # Approximate for -300 HU in raw uint16
+                else:
+                    body_threshold = float(body_threshold_hu)
+            
+            # Compute 3D body mask for the slice range
+            volume_slice_range = volume_gray[slice_min:slice_max + 1]
+            
+            # Convert volume to HU for mask computation if DICOM
+            if hu_conv is not None:
+                slope, intercept = hu_conv
+                volume_slice_range = volume_slice_range.astype(np.float32) * slope + intercept
+            
+            # Compute body mask
+            body_mask_3d = images.compute_body_mask_3d(
+                volume_slice_range,
+                spacing=spacing,
+                body_threshold=body_threshold,
+                closing_radius_mm=closing_radius_mm,
+                min_component_size_vox=min_component_size_vox,
+                outside_only=outside_only,
+            )
+            
+            # Apply non-body removal: set non-body pixels to background fill
+            # Convert background fill from HU to raw intensity if needed
+            if hu_conv is not None:
+                # DICOM: convert HU to raw intensity: HU = raw * slope + intercept
+                # So: raw = (HU - intercept) / slope
+                slope, intercept = hu_conv
+                background_fill_raw = (background_fill_hu - intercept) / slope
+            else:
+                # No HU conversion: background_fill is already in raw intensity domain
+                # If negative, it's likely meant to be black (0)
+                background_fill_raw = background_fill_hu if background_fill_hu >= 0 else 0.0
+            
+            # Clip to appropriate dtype range and convert to int
+            if volume_rgb.dtype == np.uint8:
+                fill_val = int(np.clip(background_fill_raw, 0, 255))
+            elif volume_rgb.dtype == np.uint16:
+                fill_val = int(np.clip(background_fill_raw, 0, 65535))
+            else:
+                fill_val = float(background_fill_raw)
+            
+            fill_rgb = np.array([fill_val, fill_val, fill_val], dtype=volume_rgb.dtype)
+            
+            # Apply removal to RGB volume
+            for local_z_idx, global_z_idx in enumerate(range(slice_min, slice_max + 1)):
+                if global_z_idx < len(volume_rgb):
+                    non_body_mask = ~body_mask_3d[local_z_idx]
+                    volume_rgb[global_z_idx][non_body_mask] = fill_rgb
+    
     if progress_cb is not None:
         progress_cb("loading", total, total, total)  # Mark loading as complete
 

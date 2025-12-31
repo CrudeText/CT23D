@@ -138,6 +138,16 @@ class PreprocessConfig:
     If None or empty, no non-grayscale removal is applied.
     """
     
+    non_body_removal_objects: Optional[List[dict]] = None
+    """
+    Optional list of non-body removal objects, each containing:
+    - 'parameters': dict with 'body_threshold_hu', 'closing_radius_mm', 'min_component_size_vox',
+      'outside_only', 'background_fill'
+    - 'slice_min': int - first slice where removal applies (0-based)
+    - 'slice_max': int - last slice where removal applies (0-based, inclusive)
+    If None or empty, no non-body removal is applied.
+    """
+    
     export_slice_range: Optional[Tuple[int, int]] = None
     """
     Optional tuple (min_slice, max_slice) for export slice range (0-based, inclusive).

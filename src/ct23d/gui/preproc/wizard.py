@@ -41,97 +41,134 @@ from ct23d.core import images
 from ct23d.gui.status import StatusController  # type: ignore[import]
 
 
-class AutoDetectSettingsDialog(QDialog):
-    """Dialog for configuring auto-detection parameters."""
+class NonBodyRemovalSettingsDialog(QDialog):
+    """Dialog for configuring non-body removal parameters."""
     
-    def __init__(self, parent: Optional[QWidget], params: dict) -> None:
+    # Signal emitted when parameters change (for real-time preview updates)
+    params_changed = Signal(dict)
+    
+    def __init__(self, parent: Optional[QWidget], params: dict, has_hu_metadata: bool = False,
+                 update_callback: Optional[callable] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Auto-Detection Settings")
+        self.setWindowTitle("Auto-Select Non-Body Settings")
         self.setModal(True)
+        self.update_callback = update_callback
         
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
         
-        # Aggressivity multiplier
-        self.aggressivity_spin = QDoubleSpinBox()
-        self.aggressivity_spin.setRange(0.5, 3.0)
-        self.aggressivity_spin.setSingleStep(0.1)
-        self.aggressivity_spin.setValue(params.get('aggressivity', 1.0))
-        self.aggressivity_spin.setToolTip(
-            "Controls how aggressively grey pixels are included.\n"
-            "Higher values = more aggressive (includes more grey pixels)."
-        )
-        form_layout.addRow("Aggressivity:", self.aggressivity_spin)
+        # Warning if HU metadata unavailable
+        if not has_hu_metadata:
+            warning_label = QLabel(
+                "Warning: HU metadata not available. Threshold will be interpreted in raw intensity domain."
+            )
+            warning_label.setStyleSheet("color: orange; font-weight: bold;")
+            warning_label.setWordWrap(True)
+            layout.addWidget(warning_label)
         
-        # Grey tolerance
-        self.grey_tolerance_spin = QSpinBox()
-        self.grey_tolerance_spin.setRange(10, 100)
-        self.grey_tolerance_spin.setValue(params.get('grey_tolerance', 30))
-        self.grey_tolerance_spin.setToolTip(
-            "Tolerance for including grey pixels near detected objects.\n"
-            "Higher values = include more grey pixels."
+        # Aggressiveness slider (0-100)
+        aggressiveness_layout = QHBoxLayout()
+        self.aggressiveness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.aggressiveness_slider.setRange(0, 100)
+        self.aggressiveness_slider.setValue(params.get('aggressiveness', 50))
+        self.aggressiveness_slider.setToolTip(
+            "Controls threshold and morphology aggressiveness.\n"
+            "Higher values = more aggressive (removes more pixels)."
         )
-        form_layout.addRow("Grey Tolerance:", self.grey_tolerance_spin)
+        self.aggressiveness_label = QLabel(str(params.get('aggressiveness', 50)))
+        self.aggressiveness_slider.valueChanged.connect(
+            lambda v: self.aggressiveness_label.setText(str(v))
+        )
+        aggressiveness_layout.addWidget(self.aggressiveness_slider)
+        aggressiveness_layout.addWidget(self.aggressiveness_label)
+        form_layout.addRow("Aggressiveness:", aggressiveness_layout)
         
-        # Minimum intensity - updated based on dtype
-        self.min_intensity_spin = QSpinBox()
-        max_intensity = params.get('max_intensity', 255)
-        # Scale default min_intensity if switching from uint8 to uint16
-        default_min = params.get('min_intensity', 150)
-        if max_intensity == 65535 and default_min <= 255:
-            # Scale from uint8 to uint16
-            default_min = int(round(default_min * (65535.0 / 255.0)))
-        self.min_intensity_spin.setRange(100, max_intensity)
-        self.min_intensity_spin.setValue(default_min)
-        self.min_intensity_spin.setToolTip(
-            "Minimum intensity for detecting bright objects (bed/headrest).\n"
-            "Lower values = detect dimmer objects."
+        # Body threshold (HU or raw intensity)
+        self.body_threshold_spin = QDoubleSpinBox()
+        self.body_threshold_spin.setRange(-2000.0, 5000.0)
+        self.body_threshold_spin.setSingleStep(10.0)
+        self.body_threshold_spin.setValue(params.get('body_threshold_hu', -300.0))
+        self.body_threshold_spin.setToolTip(
+            "Intensity threshold for body tissue.\n"
+            "Pixels below this value are considered non-body.\n"
+            "Default: -300 HU (typical for soft tissue/air boundary)."
         )
-        form_layout.addRow("Min Intensity:", self.min_intensity_spin)
+        form_layout.addRow("Body Threshold (HU):", self.body_threshold_spin)
         
-        # Bottom region ratio
-        self.bottom_region_spin = QDoubleSpinBox()
-        self.bottom_region_spin.setRange(0.1, 0.8)
-        self.bottom_region_spin.setSingleStep(0.05)
-        self.bottom_region_spin.setValue(params.get('bottom_region_ratio', 0.4))
-        self.bottom_region_spin.setToolTip(
-            "Fraction of image height to scan from bottom.\n"
-            "0.4 = scan from bottom 40% of image upward."
+        # Closing radius (mm)
+        self.closing_radius_spin = QDoubleSpinBox()
+        self.closing_radius_spin.setRange(0.0, 50.0)
+        self.closing_radius_spin.setSingleStep(1.0)
+        self.closing_radius_spin.setValue(params.get('closing_radius_mm', 8.0))
+        self.closing_radius_spin.setToolTip(
+            "Morphological closing radius in millimeters.\n"
+            "Larger values fill more gaps in the body mask."
         )
-        form_layout.addRow("Bottom Region Ratio:", self.bottom_region_spin)
+        form_layout.addRow("Closing Radius (mm):", self.closing_radius_spin)
         
-        # Min size ratio
-        self.min_size_spin = QDoubleSpinBox()
-        self.min_size_spin.setRange(0.001, 0.1)
-        self.min_size_spin.setSingleStep(0.001)
-        self.min_size_spin.setDecimals(3)
-        self.min_size_spin.setValue(params.get('min_size_ratio', 0.01))
-        self.min_size_spin.setToolTip(
-            "Minimum size of objects to detect (as fraction of image).\n"
-            "0.01 = 1% of image pixels."
+        # Minimum component size (voxels)
+        self.min_component_size_spin = QSpinBox()
+        self.min_component_size_spin.setRange(0, 1000000)
+        self.min_component_size_spin.setValue(params.get('min_component_size_vox', 1000))
+        self.min_component_size_spin.setToolTip(
+            "Minimum size of connected components to keep (in voxels).\n"
+            "Smaller components are removed."
         )
-        form_layout.addRow("Min Size Ratio:", self.min_size_spin)
+        form_layout.addRow("Min Component Size (voxels):", self.min_component_size_spin)
         
-        # Max size ratio
-        self.max_size_spin = QDoubleSpinBox()
-        self.max_size_spin.setRange(0.1, 0.9)
-        self.max_size_spin.setSingleStep(0.05)
-        self.max_size_spin.setValue(params.get('max_size_ratio', 0.4))
-        self.max_size_spin.setToolTip(
-            "Maximum size of objects to detect (as fraction of image).\n"
-            "0.4 = 40% of image pixels."
+        # Outside only checkbox
+        self.outside_only_cb = QCheckBox()
+        self.outside_only_cb.setChecked(params.get('outside_only', True))
+        self.outside_only_cb.setToolTip(
+            "If enabled, only removes pixels outside the body (avoids internal air pockets).\n"
+            "If disabled, removes all non-body pixels."
         )
-        form_layout.addRow("Max Size Ratio:", self.max_size_spin)
+        form_layout.addRow("Outside Only:", self.outside_only_cb)
         
-        # Scan upward checkbox
-        self.scan_upward_cb = QCheckBox()
-        self.scan_upward_cb.setChecked(params.get('scan_upward', True))
-        self.scan_upward_cb.setToolTip(
-            "If enabled, scans upward from bottom to find connected bed components."
+        # Background fill value
+        self.background_fill_spin = QDoubleSpinBox()
+        self.background_fill_spin.setRange(-2000.0, 5000.0)
+        self.background_fill_spin.setSingleStep(10.0)
+        default_fill = params.get('background_fill', -1024.0)  # Air in HU
+        self.background_fill_spin.setValue(default_fill)
+        self.background_fill_spin.setToolTip(
+            "Value to set removed pixels to.\n"
+            "Default: -1024 HU (air) for DICOM, 0 for non-DICOM."
         )
-        form_layout.addRow("Scan Upward:", self.scan_upward_cb)
+        form_layout.addRow("Background Fill:", self.background_fill_spin)
+        
+        # Center of mass threshold
+        center_mass_layout = QHBoxLayout()
+        self.center_of_mass_spin = QDoubleSpinBox()
+        self.center_of_mass_spin.setRange(0.0, 1.0)
+        self.center_of_mass_spin.setSingleStep(0.05)
+        self.center_of_mass_spin.setDecimals(2)
+        default_center_mass = params.get('center_of_mass_threshold', 0.6)
+        self.center_of_mass_spin.setValue(default_center_mass)
+        self.center_of_mass_spin.setToolTip(
+            "Threshold for center of mass check (0.0-1.0).\n"
+            "Only components with center of mass below this fraction of image height\n"
+            "are considered for bedrest removal. Higher values = more conservative\n"
+            "(preserves legs better). Default: 0.6 (center must be in lower 40% of image)."
+        )
+        center_mass_layout.addWidget(self.center_of_mass_spin)
+        center_mass_layout.addStretch()
+        form_layout.addRow("Center of Mass Threshold:", center_mass_layout)
         
         layout.addLayout(form_layout)
+        
+        # Connect all controls to emit params_changed signal for real-time preview updates
+        def emit_params_changed():
+            if self.update_callback:
+                self.update_callback(self.get_params())
+        
+        self.aggressiveness_slider.valueChanged.connect(emit_params_changed)
+        self.body_threshold_spin.valueChanged.connect(emit_params_changed)
+        self.closing_radius_spin.valueChanged.connect(emit_params_changed)
+        self.min_component_size_spin.valueChanged.connect(emit_params_changed)
+        self.outside_only_cb.toggled.connect(emit_params_changed)
+        self.background_fill_spin.valueChanged.connect(emit_params_changed)
+        self.center_of_mass_spin.valueChanged.connect(emit_params_changed)
         
         # Buttons
         buttons = QDialogButtonBox(
@@ -146,13 +183,13 @@ class AutoDetectSettingsDialog(QDialog):
     def get_params(self) -> dict:
         """Return the current parameter values."""
         return {
-            'aggressivity': self.aggressivity_spin.value(),
-            'grey_tolerance': self.grey_tolerance_spin.value(),
-            'min_intensity': self.min_intensity_spin.value(),
-            'bottom_region_ratio': self.bottom_region_spin.value(),
-            'min_size_ratio': self.min_size_spin.value(),
-            'max_size_ratio': self.max_size_spin.value(),
-            'scan_upward': self.scan_upward_cb.isChecked(),
+            'aggressiveness': self.aggressiveness_slider.value(),
+            'body_threshold_hu': self.body_threshold_spin.value(),
+            'closing_radius_mm': self.closing_radius_spin.value(),
+            'min_component_size_vox': self.min_component_size_spin.value(),
+            'outside_only': self.outside_only_cb.isChecked(),
+            'background_fill': self.background_fill_spin.value(),
+            'center_of_mass_threshold': self.center_of_mass_spin.value(),
         }
 
 
@@ -691,15 +728,15 @@ class PreprocessWizard(QWidget):
         self.crop_mode: bool = False  # Whether user is in crop selection mode
         self.current_crop_mask: Optional[np.ndarray] = None  # Current crop mask being drawn (not yet added to table)
         
-        # Auto-detection parameters
-        self.auto_detect_params = {
-            'bottom_region_ratio': 0.4,
-            'min_intensity': 150,
-            'min_size_ratio': 0.01,
-            'max_size_ratio': 0.4,
-            'scan_upward': True,
-            'grey_tolerance': 30,
-            'aggressivity': 1.0,  # Multiplier for dilation/closing operations
+        # Non-body removal parameters
+        self.non_body_params = {
+            'aggressiveness': 50,  # 0-100 slider
+            'body_threshold_hu': -300.0,  # HU threshold for body tissue
+            'closing_radius_mm': 8.0,  # Morphological closing radius in mm
+            'min_component_size_vox': 1000,  # Minimum component size in voxels
+            'outside_only': True,  # Only remove pixels outside body (avoid internal air)
+            'background_fill': -1024.0,  # Fill value for removed pixels (air in HU)
+            'center_of_mass_threshold': 0.6,  # Center of mass threshold (0.0-1.0)
         }
 
         layout = QVBoxLayout(self)
@@ -730,7 +767,7 @@ class PreprocessWizard(QWidget):
         choose_output_btn.setMaximumWidth(150)  # Smaller button
         choose_output_btn.clicked.connect(self.select_output_dir)
         row2.addWidget(choose_output_btn)
-        self.output_label = QLabel("Processed directory: (auto)")
+        self.output_label = QLabel("Processed directory: (not selected)")
         self.output_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         row2.addWidget(self.output_label)
         row2.addStretch()  # Push everything to the left
@@ -945,25 +982,23 @@ class PreprocessWizard(QWidget):
             self.clear_selection_btn.clicked.connect(self.clear_object_selection)
             buttons_row.addWidget(self.clear_selection_btn)
             
-            # Auto-detect bed/headrest button with settings
-            self.auto_detect_btn = QPushButton("Auto-Detect Bed/Headrest")
-            self.auto_detect_btn.setEnabled(False)
-            self.auto_detect_btn.clicked.connect(self.auto_detect_bed_headrest)
-            self.auto_detect_btn.setToolTip(
-                "⚠️ IMPORTANT: Auto-detection scans from BOTTOM UPWARD.\n"
-                "The bed/headrest MUST be located UNDERNEATH the body/head.\n"
-                "It will find multiple bed components and include grey pixels.\n"
-                "If the bed is on the side or top, use the rotation buttons first."
+            # Auto-select non-body button with settings
+            self.auto_select_non_body_btn = QPushButton("Auto-Select Non-Body")
+            self.auto_select_non_body_btn.setEnabled(False)
+            self.auto_select_non_body_btn.clicked.connect(self.auto_select_non_body)
+            self.auto_select_non_body_btn.setToolTip(
+                "Automatically detect and remove non-body pixels (air, background, bed, etc.).\n"
+                "Adds a modification to the table that will be applied during preprocessing."
             )
-            buttons_row.addWidget(self.auto_detect_btn)
+            buttons_row.addWidget(self.auto_select_non_body_btn)
             
-            # Settings icon button
-            self.auto_detect_settings_btn = QPushButton("⚙")
-            self.auto_detect_settings_btn.setEnabled(False)
-            self.auto_detect_settings_btn.setFixedWidth(30)
-            self.auto_detect_settings_btn.setToolTip("Configure auto-detection parameters")
-            self.auto_detect_settings_btn.clicked.connect(self.show_auto_detect_settings)
-            buttons_row.addWidget(self.auto_detect_settings_btn)
+            # Settings icon button (can be used even without images to configure parameters)
+            self.non_body_settings_btn = QPushButton("⚙")
+            self.non_body_settings_btn.setEnabled(True)  # Always enabled to configure parameters
+            self.non_body_settings_btn.setFixedWidth(30)
+            self.non_body_settings_btn.setToolTip("Configure non-body removal parameters")
+            self.non_body_settings_btn.clicked.connect(self.show_non_body_settings)
+            buttons_row.addWidget(self.non_body_settings_btn)
             
             buttons_row.addStretch()  # Push buttons to the left
             selection_layout.addLayout(buttons_row)
@@ -1171,10 +1206,10 @@ class PreprocessWizard(QWidget):
             self.input_label.setText(f"Input directory: {dir_path}")
             self.input_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-            # Auto-suggest processed_slices under the input dir
-            auto_out = dir_path / "processed_slices"
-            self.output_dir = auto_out
-            self.output_label.setText(f"Processed directory: {auto_out}")
+            # Don't auto-suggest output folder - user must choose it explicitly
+            # Reset output directory to None so user must select it
+            self.output_dir = None
+            self.output_label.setText("Processed directory: (not selected)")
             self.output_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
             # Load image paths and initialize preview
@@ -1211,6 +1246,14 @@ class PreprocessWizard(QWidget):
                 "Please select an input directory containing CT slices.",
             )
             return
+        
+        if self.output_dir is None:
+            QMessageBox.warning(
+                self,
+                "Missing output directory",
+                "Please select an output directory for processed slices.",
+            )
+            return
 
         # Separate objects by type and slice range
         # For object removal masks, combine them (they're applied together)
@@ -1240,6 +1283,9 @@ class PreprocessWizard(QWidget):
             slice_max = obj.get('slice_max', len(self.image_paths) - 1)
             non_grayscale_ranges.append((slice_min, slice_max))
         
+        # Collect non-body removal objects
+        non_body_removal_objects = [obj for obj in self.selected_objects if obj.get('type') == 'AUTO_NON_BODY_REMOVAL']
+        
         # Get export slice range
         export_slice_range = None
         if self.export_range_rb.isChecked():
@@ -1254,8 +1300,15 @@ class PreprocessWizard(QWidget):
                 return
             export_slice_range = (min_slice, max_slice)
         
-        # Disable cache if we have object masks or rotation, since those change the output
-        use_cache = (combined_mask is None and self.image_rotation == 0)
+        # Disable cache if we have object masks, rotation, non-body removal, crops, or non-grayscale removal,
+        # since those change the output
+        use_cache = (
+            combined_mask is None 
+            and self.image_rotation == 0 
+            and len(non_body_removal_objects) == 0
+            and len(crop_objects) == 0
+            and len(non_grayscale_objects) == 0
+        )
         
         # Get export prefix (empty string means None)
         export_prefix = self.export_prefix_input.text().strip()
@@ -1277,6 +1330,7 @@ class PreprocessWizard(QWidget):
             crop_objects=crop_objects,  # List of crop objects with masks and slice ranges
             object_removal_objects=removal_objects,  # List of removal objects with masks and slice ranges
             non_grayscale_slice_ranges=non_grayscale_ranges if non_grayscale_ranges else None,  # Slice ranges for non-grayscale removal
+            non_body_removal_objects=non_body_removal_objects if non_body_removal_objects else None,  # List of non-body removal objects
             export_slice_range=export_slice_range,  # Export slice range
             export_prefix=export_prefix,  # Export filename prefix
             reordered_slice_paths=self.image_paths if (self.slice_reordered or self.reorder_for_export_cb.isChecked()) else None,  # Use reordered paths if reordered or checkbox is checked
@@ -1389,9 +1443,8 @@ class PreprocessWizard(QWidget):
                 
                 # Enable object selection buttons
                 self.select_objects_btn.setEnabled(True)
-                self.auto_detect_btn.setEnabled(True)
-                self.auto_detect_settings_btn.setEnabled(True)
-                self.auto_detect_settings_btn.setEnabled(True)
+                self.auto_select_non_body_btn.setEnabled(True)
+                self.non_body_settings_btn.setEnabled(True)
                 self.rotate_90_cw_btn.setEnabled(True)
                 self.rotate_90_ccw_btn.setEnabled(True)
                 self.rotate_180_btn.setEnabled(True)
@@ -1627,22 +1680,98 @@ class PreprocessWizard(QWidget):
             # Store original image for object detection (without rotation)
             self.before_label.set_original_image(original_rgb)
             
+            # Check if we need to highlight pixels (black threshold or non-body removal)
+            highlighted_rgb = original_rgb.copy()
+            has_highlighting = False
+            
             # If visualizing black threshold, highlight those pixels
             if self.visualizing_black_threshold:
                 min_value = self.black_threshold_min_spin.value()
                 max_value = self.black_threshold_max_spin.value()
                 black_mask = self._get_black_threshold_mask(original_rgb, min_value, max_value)
                 
-                # Create highlighted version
-                highlighted_rgb = original_rgb.copy()
-                # Highlight black pixels in yellow
-                highlighted_rgb[black_mask, 0] = np.minimum(255, highlighted_rgb[black_mask, 0] + 100)
-                highlighted_rgb[black_mask, 1] = np.minimum(255, highlighted_rgb[black_mask, 1] + 100)
+                # Highlight black pixels in yellow (higher intensity)
+                highlighted_rgb[black_mask, 0] = np.minimum(255, highlighted_rgb[black_mask, 0].astype(np.int32) + 180).astype(highlighted_rgb.dtype)
+                highlighted_rgb[black_mask, 1] = np.minimum(255, highlighted_rgb[black_mask, 1].astype(np.int32) + 180).astype(highlighted_rgb.dtype)
                 highlighted_rgb[black_mask, 2] = highlighted_rgb[black_mask, 2]  # Keep blue low for yellow tint
-                
+                has_highlighting = True
+            
+            # If AUTO_NON_BODY_REMOVAL modification exists for current slice, highlight non-body pixels
+            non_body_objects = [obj for obj in self.selected_objects if obj.get('type') == 'AUTO_NON_BODY_REMOVAL']
+            for non_body_obj in non_body_objects:
+                slice_min = non_body_obj.get('slice_min', 0)
+                slice_max = non_body_obj.get('slice_max', len(self.image_paths) - 1)
+                if slice_min <= self.current_image_index <= slice_max:
+                    params = non_body_obj.get('parameters', self.non_body_params)
+                    
+                    # Convert RGB to grayscale for body mask computation (on original, unrotated image)
+                    if original_rgb.ndim == 3 and original_rgb.shape[2] == 3:
+                        slice_gray = np.max(original_rgb, axis=2).astype(np.float32)
+                    else:
+                        slice_gray = original_rgb.astype(np.float32)
+                    
+                    # Convert to HU if DICOM and HU metadata is available
+                    body_threshold_hu = params.get('body_threshold_hu', -300.0)
+                    image_path = self.image_paths[self.current_image_index]
+                    hu_conv = None
+                    if images._is_dicom_file(image_path):
+                        hu_conv = images.get_dicom_hu_conversion(image_path)
+                        if hu_conv is not None:
+                            # Convert slice data to HU
+                            slope, intercept = hu_conv
+                            slice_gray = slice_gray.astype(np.float32) * slope + intercept
+                            body_threshold = body_threshold_hu  # Use HU threshold directly
+                        else:
+                            # No HU metadata - convert HU threshold to approximate raw intensity
+                            if body_threshold_hu < 0:
+                                body_threshold = 200.0
+                            else:
+                                body_threshold = float(body_threshold_hu)
+                    else:
+                        # Not a DICOM file - use threshold as raw intensity
+                        max_val = float(slice_gray.max())
+                        if max_val <= 255:
+                            body_threshold = 50.0
+                        else:
+                            body_threshold = 2000.0
+                        if body_threshold_hu > 0:
+                            body_threshold = float(body_threshold_hu)
+                    
+                    # Compute 2D body mask for visualization (same as preview)
+                    closing_radius_px = params.get('closing_radius_mm', 8.0)
+                    min_component_size_px = params.get('min_component_size_vox', 1000)
+                    outside_only = params.get('outside_only', True)
+                    center_of_mass_threshold = params.get('center_of_mass_threshold', 0.6)
+                    
+                    body_mask = images.compute_body_mask_2d(
+                        slice_gray,
+                        body_threshold=body_threshold,
+                        closing_radius_px=closing_radius_px,
+                        min_component_size_px=min_component_size_px,
+                        outside_only=outside_only,
+                        center_of_mass_threshold=center_of_mass_threshold,
+                    )
+                    
+                    # Highlight non-body pixels (that will be removed) in yellow (higher intensity)
+                    non_body_mask = ~body_mask
+                    if np.any(non_body_mask):
+                        # Ensure we can add to the values (convert to int if needed)
+                        if highlighted_rgb.dtype in (np.uint8, np.uint16):
+                            # For uint8/uint16, we need to be careful with overflow
+                            highlighted_rgb = highlighted_rgb.astype(np.float32)
+                        highlighted_rgb[non_body_mask, 0] = np.minimum(255, highlighted_rgb[non_body_mask, 0] + 180)
+                        highlighted_rgb[non_body_mask, 1] = np.minimum(255, highlighted_rgb[non_body_mask, 1] + 180)
+                        highlighted_rgb[non_body_mask, 2] = highlighted_rgb[non_body_mask, 2]  # Keep blue low for yellow tint
+                        # Convert back to original dtype if it was uint8/uint16
+                        if original_rgb.dtype in (np.uint8, np.uint16):
+                            highlighted_rgb = np.clip(highlighted_rgb, 0, 255 if original_rgb.dtype == np.uint8 else 65535).astype(original_rgb.dtype)
+                        has_highlighting = True
+                    break  # Only highlight first non-body removal if multiple exist
+            
+            # Display highlighted or original
+            if has_highlighting:
                 original_pixmap = self.numpy_to_qpixmap(highlighted_rgb)
             else:
-                # Display original
                 original_pixmap = self.numpy_to_qpixmap(original_rgb)
             # Scale to fit label while maintaining aspect ratio
             # Use actual size if available, otherwise use minimum size
@@ -1728,6 +1857,88 @@ class PreprocessWizard(QWidget):
                     if slice_min <= self.current_image_index <= slice_max:
                         apply_non_grayscale = True
                         break
+            
+            # Apply AUTO_NON_BODY_REMOVAL preview (2D approximation)
+            non_body_objects = [obj for obj in self.selected_objects if obj.get('type') == 'AUTO_NON_BODY_REMOVAL']
+            for non_body_obj in non_body_objects:
+                slice_min = non_body_obj.get('slice_min', 0)
+                slice_max = non_body_obj.get('slice_max', len(self.image_paths) - 1)
+                if slice_min <= self.current_image_index <= slice_max:
+                    params = non_body_obj.get('parameters', self.non_body_params)
+                    
+                    # Convert RGB to grayscale for body mask computation
+                    if rotated_rgb.ndim == 3 and rotated_rgb.shape[2] == 3:
+                        # Use max channel (better for medical imaging)
+                        slice_gray = np.max(rotated_rgb, axis=2).astype(np.float32)
+                    else:
+                        slice_gray = rotated_rgb.astype(np.float32)
+                    
+                    # Convert to HU if DICOM and HU metadata is available
+                    body_threshold_hu = params.get('body_threshold_hu', -300.0)
+                    image_path = self.image_paths[self.current_image_index]
+                    hu_conv = None
+                    if images._is_dicom_file(image_path):
+                        hu_conv = images.get_dicom_hu_conversion(image_path)
+                        if hu_conv is not None:
+                            # Convert slice data to HU
+                            slope, intercept = hu_conv
+                            slice_gray = slice_gray.astype(np.float32) * slope + intercept
+                            body_threshold = body_threshold_hu  # Use HU threshold directly
+                        else:
+                            # No HU metadata - convert HU threshold to approximate raw intensity
+                            # Typical DICOM: -300 HU ≈ 200-300 in raw uint16 (assuming slope=1, intercept=-1024)
+                            # Use a reasonable default for raw intensity
+                            if body_threshold_hu < 0:
+                                body_threshold = 200.0  # Approximate for -300 HU in raw uint16
+                            else:
+                                body_threshold = float(body_threshold_hu)
+                    else:
+                        # Not a DICOM file - use threshold as raw intensity
+                        # For non-DICOM, HU threshold doesn't apply - use a reasonable default
+                        # Estimate based on image range
+                        max_val = float(slice_gray.max())
+                        if max_val <= 255:
+                            body_threshold = 50.0  # Reasonable default for 8-bit images
+                        else:
+                            body_threshold = 2000.0  # Reasonable default for 16-bit images
+                        # If threshold was explicitly set to a positive value, use it
+                        if body_threshold_hu > 0:
+                            body_threshold = float(body_threshold_hu)
+                    
+                    # Compute 2D body mask
+                    closing_radius_px = params.get('closing_radius_mm', 8.0)  # Approximate: 1 mm ≈ 1 pixel
+                    min_component_size_px = params.get('min_component_size_vox', 1000)
+                    outside_only = params.get('outside_only', True)
+                    center_of_mass_threshold = params.get('center_of_mass_threshold', 0.6)
+                    
+                    body_mask = images.compute_body_mask_2d(
+                        slice_gray,
+                        body_threshold=body_threshold,
+                        closing_radius_px=closing_radius_px,
+                        min_component_size_px=min_component_size_px,
+                        outside_only=outside_only,
+                        center_of_mass_threshold=center_of_mass_threshold,
+                    )
+                    
+                    # Apply non-body removal (set non-body pixels to background fill)
+                    background_fill = params.get('background_fill', -1024.0)
+                    rotated_rgb = rotated_rgb.copy()
+                    non_body_mask = ~body_mask
+                    
+                    # Convert background fill to RGB (grayscale)
+                    if background_fill < 0:
+                        # For negative values (HU), clip to 0 for display
+                        fill_val = 0
+                    else:
+                        # Scale to 0-255 range for uint8, or keep as-is for uint16
+                        if rotated_rgb.dtype == np.uint8:
+                            fill_val = int(np.clip(background_fill, 0, 255))
+                        else:
+                            fill_val = int(np.clip(background_fill, 0, 65535))
+                    
+                    # Apply fill
+                    rotated_rgb[non_body_mask] = [fill_val, fill_val, fill_val]
+                    break  # Only apply first non-body removal if multiple exist
             
             # Process single slice - always apply masks aggressively within their slice range
             # Create object_removal_objects list for this specific slice
@@ -1996,6 +2207,10 @@ class PreprocessWizard(QWidget):
             if obj.get('type') == 'Crop':
                 label_item = QTableWidgetItem(obj.get('label', 'Crop'))
                 self.objects_table.setItem(row, 1, label_item)
+            elif obj.get('type') == 'AUTO_NON_BODY_REMOVAL':
+                label_item = QTableWidgetItem(obj.get('label', 'Non-body removal (auto)'))
+                label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)  # Read-only
+                self.objects_table.setItem(row, 1, label_item)
             else:
                 label_combo = QComboBox()
                 label_combo.addItems(label_options)
@@ -2102,11 +2317,23 @@ class PreprocessWizard(QWidget):
         if not self.selected_objects:
             self.object_mask = None
             return
-            
-        # Combine all masks
-        combined = np.zeros_like(self.selected_objects[0]['mask'], dtype=bool)
+        
+        # Find first object with a mask to get the shape (skip objects without 'mask' key)
+        first_mask_obj = None
         for obj in self.selected_objects:
-            if obj['mask'] is not None:
+            if 'mask' in obj and obj.get('mask') is not None:
+                first_mask_obj = obj
+                break
+        
+        if first_mask_obj is None:
+            # No objects with masks (e.g., only AUTO_NON_BODY_REMOVAL objects)
+            self.object_mask = None
+            return
+            
+        # Combine all masks from objects that have them
+        combined = np.zeros_like(first_mask_obj['mask'], dtype=bool)
+        for obj in self.selected_objects:
+            if 'mask' in obj and obj.get('mask') is not None:
                 combined = combined | obj['mask']
         self.object_mask = combined
 
@@ -2122,116 +2349,100 @@ class PreprocessWizard(QWidget):
             self.toggle_selection_mode()  # Turn off selection mode
         self.update_preview()
     
-    def auto_detect_bed_headrest(self) -> None:
-        """Automatically detect and select bed/headrest in current slice."""
-        if not self.image_paths or self.current_image_index < 0:
-            return
-        
-        # Show loading dialog
-        progress = QProgressDialog(
-            "Auto-detecting bed/headrest...\nThis may take a few seconds.",
-            None,  # No cancel button
-            0, 0,  # Indeterminate progress
-            self
-        )
-        progress.setWindowTitle("Auto-Detection")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)  # Show immediately
-        progress.show()
-        
-        # Process events to show the dialog
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
-        
+    def auto_select_non_body(self) -> None:
+        """Add AUTO_NON_BODY_REMOVAL modification to the table without computing 3D mask."""
         try:
-            # Load current image without rotation (rotation only for preview)
-            image_path = self.image_paths[self.current_image_index]
-            original_rgb = images.load_image_rgb(image_path, rotation=0)
-            
-            # Apply rotation for auto-detection (so it works on rotated preview)
-            if self.image_rotation != 0:
-                original_rgb = images.rotate_image_rgb(original_rgb, self.image_rotation)
-            
-            # Process events periodically during detection
-            QApplication.processEvents()
-            
-            # Run auto-detection with current parameters
-            bed_mask = images.auto_detect_bed_headrest(
-                original_rgb,
-                bottom_region_ratio=self.auto_detect_params['bottom_region_ratio'],
-                min_intensity=self.auto_detect_params['min_intensity'],
-                min_size_ratio=self.auto_detect_params['min_size_ratio'],
-                max_size_ratio=self.auto_detect_params['max_size_ratio'],
-                scan_upward=self.auto_detect_params['scan_upward'],
-                grey_tolerance=self.auto_detect_params['grey_tolerance'],
-                aggressivity=self.auto_detect_params['aggressivity'],
-            )
-            
-            # Close progress dialog
-            progress.close()
-            
-            if bed_mask is not None and np.sum(bed_mask) > 0:
-                # Add as a new selected object
-                object_id = str(uuid.uuid4())
-                self.selected_objects.append({
-                    'id': object_id,
-                    'mask': bed_mask,
-                    'label': 'bed',  # Default label
-                    'slice_index': self.current_image_index,  # Track which slice this was selected on
-                })
-                
-                # Track the slice where mask was selected
-                if self.mask_selected_slice_index is None:
-                    self.mask_selected_slice_index = self.current_image_index
-                
-                # Update UI
-                self._update_objects_table()
-                self._update_combined_mask()
-                self.clear_selection_btn.setEnabled(True)
-                self.update_preview()
-                
-                QMessageBox.information(
-                    self,
-                    "Auto-Detection Successful",
-                    f"Detected bed/headrest with {np.sum(bed_mask)} pixels.\n"
-                    "The mask will be propagated across all slices."
-                )
-            else:
+            if not self.image_paths:
                 QMessageBox.warning(
                     self,
-                    "Auto-Detection Failed",
-                    "⚠️ Could not automatically detect bed/headrest in this slice.\n\n"
-                    "Remember: Auto-detection scans from BOTTOM UPWARD.\n"
-                    "The bed/headrest MUST be UNDERNEATH the body/head.\n\n"
-                    "If the bed is on the side or top, use the rotation buttons first."
+                    "No Images",
+                    "Please select an input folder with images first."
                 )
+                return
+            
+            # Check if there's already a non-body removal modification
+            for obj in self.selected_objects:
+                if obj.get('type') == 'AUTO_NON_BODY_REMOVAL':
+                    QMessageBox.information(
+                        self,
+                        "Already Added",
+                        "Non-body removal is already in the modifications table."
+                    )
+                    return
+            
+            # Add new modification row
+            object_id = str(uuid.uuid4())
+            num_slices = len(self.image_paths)
+            self.selected_objects.append({
+                'id': object_id,
+                'type': 'AUTO_NON_BODY_REMOVAL',
+                'label': 'Non-body removal (auto)',
+                'slice_min': 0,
+                'slice_max': num_slices - 1,
+                'parameters': self.non_body_params.copy(),
+            })
+            
+            # Update UI
+            self._update_objects_table()
+            self.update_preview()
         except Exception as e:
-            progress.close()
             QMessageBox.critical(
                 self,
-                "Auto-Detection Error",
-                f"Error during auto-detection: {str(e)}"
+                "Error",
+                f"Error adding non-body removal: {str(e)}"
             )
     
-    def show_auto_detect_settings(self) -> None:
-        """Show settings dialog for auto-detection parameters."""
-        # Update max intensity in params based on detected dtype
-        max_intensity = 255  # Default
-        if self.image_paths:
-            try:
-                first_image = images.load_image_rgb(self.image_paths[0], rotation=0)
-                if first_image.dtype == np.uint16 or images._is_dicom_file(self.image_paths[0]):
-                    max_intensity = 65535
-            except Exception:
-                pass
-        
-        # Update dialog params with max intensity
-        dialog_params = self.auto_detect_params.copy()
-        dialog_params['max_intensity'] = max_intensity
-        
-        dialog = AutoDetectSettingsDialog(self, dialog_params)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.auto_detect_params.update(dialog.get_params())
+    def show_non_body_settings(self) -> None:
+        """Show settings dialog for non-body removal parameters."""
+        try:
+            # Check if HU metadata is available (settings can be opened even without images)
+            has_hu_metadata = False
+            if self.image_paths:
+                try:
+                    first_path = self.image_paths[0]
+                    if images._is_dicom_file(first_path):
+                        hu_conv = images.get_dicom_hu_conversion(first_path)
+                        has_hu_metadata = hu_conv is not None
+                except Exception:
+                    pass
+            
+            # Create callback for real-time preview updates
+            def update_preview_with_params(new_params: dict) -> None:
+                """Update preview with new parameters while dialog is open."""
+                # Temporarily update non_body_params for preview
+                old_params = self.non_body_params.copy()
+                self.non_body_params.update(new_params)
+                
+                # Update parameters in existing non-body removal modification if any
+                for obj in self.selected_objects:
+                    if obj.get('type') == 'AUTO_NON_BODY_REMOVAL':
+                        obj['parameters'] = new_params.copy()
+                
+                if self.image_paths:
+                    self.update_preview()
+                
+                # Restore old params (will be set properly if user clicks OK)
+                self.non_body_params = old_params
+            
+            dialog = NonBodyRemovalSettingsDialog(self, self.non_body_params.copy(), has_hu_metadata,
+                                                  update_callback=update_preview_with_params)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.non_body_params.update(dialog.get_params())
+                
+                # Update parameters in existing non-body removal modification if any
+                for obj in self.selected_objects:
+                    if obj.get('type') == 'AUTO_NON_BODY_REMOVAL':
+                        obj['parameters'] = self.non_body_params.copy()
+                
+                if self.image_paths:
+                    self.update_preview()
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Error showing non-body removal settings: {str(e)}\n\n{traceback.format_exc()}"
+            )
     
     def _on_black_threshold_min_changed(self) -> None:
         """Handle black threshold min value change - ensure min <= max and update preview."""
