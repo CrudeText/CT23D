@@ -164,6 +164,10 @@ The project is designed to be:
   - Cancellable operations with proper cleanup
 
 ### 3D Preview (Tab 3)
+
+![3D Preview](./images/3D_Preview_example.png)
+*3D Preview tab with interactive mesh visualization, opacity controls, and mesh generation tools*
+
 - **Load Canonical Volume:**
   - Load NRRD format volumes exported from the Meshing tab
   - Displays file path next to load button
@@ -501,9 +505,6 @@ Each enabled bin produces a separate mesh file (or all bins combined into one fi
   - Component filtering applied (if enabled)
   - Gaussian smoothing applied (if enabled)
   - Spacing metadata preserved in NRRD format
-
-![3D Preview](./images/3D_Preview_example.png)
-*3D Preview tab with interactive mesh visualization, opacity controls, and mesh generation tools*
 
 ---
 
