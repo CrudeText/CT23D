@@ -1,67 +1,31 @@
-# CT23D – CT Slice to 3D Mesh Pipeline
+# CT23D
 
-CT23D is a modular Python application for converting stacks of CT slice images into 3D meshes.
-It provides both a graphical interface and a programmatic core to preprocess CT slices, build volumetric data, analyze intensity distributions, and generate intensity-based 3D meshes.
+Convert medical CT data into 3D meshes with DICOM-native workflows and advanced preprocessing.
 
-The project is designed to be:
-- Cleanly structured
-- Extensible
-- Usable both interactively (GUI) and headless (CLI / scripting)
+CT23D is a Python toolkit for converting medical CT scan data into 3D surface meshes. It is designed with DICOM as the primary input format, preserving 16-bit intensity ranges and metadata throughout the processing pipeline. PNG and JPEG formats are supported as secondary fallback options. The tool is built for researchers, engineers, and technical users working with medical imaging data who need reliable, reproducible workflows from raw scans to exportable 3D models.
+
+## Key Features
+
+- **DICOM-first processing:** Native support for DICOM files with automatic 16-bit intensity handling and metadata preservation
+- **Robust preprocessing:** Automatic overlay removal, bed/headrest detection, and manual object selection tools
+- **Intensity-based meshing:** Flexible binning system for generating multiple meshes per dataset
+- **Separation of concerns:** Core processing logic is independent of GUI and CLI, enabling both interactive and headless workflows
+- **YAML-based configuration:** Project configuration system using relative paths for reproducibility
+- **Multiple export formats:** PLY, STL, and NRRD support with per-vertex colors and opacity
+
+## Development Status
+
+CT23D is actively developed. The GUI provides a functional end-to-end workflow but continues to evolve with new features and refinements. Core processing functionality is stable and well-tested.
 
 ---
 
-## Features
+## Graphical User Interface Overview
 
-### Image Processing (Tab 1)
-- Load raw CT slice images (PNG, JPG, TIFF, DICOM, etc.)
-- **Interactive object selection tools:**
-  - Box selection
-  - Lasso selection
-  - Click-to-select with hover highlighting
-  - Configurable selection tolerance
-- **Automatic bed/headrest detection:**
-  - Scans from bottom upward
-  - Configurable aggressivity and parameters
-  - Settings dialog for fine-tuning
-- **Image Transformation & Cropping:**
-  - **Rotation:** 90° clockwise, 90° counter-clockwise, 180°
-  - **Cropping:** Box or lasso selection with slice range specification
-  - Multiple crops with different slice ranges
-  - Preview transformations before processing
-  - Applied to entire volume during preprocessing
-- **Black Threshold (Background Removal):**
-  - Min/max intensity range selection (automatically adapts for DICOM uint16 vs standard uint8)
-  - Visualize pixels within threshold range
-  - Add threshold selection to removal list
-  - Removes pixels from all slices or specified slice ranges
-- **Remove non-grayscale pixels:**
-  - Configurable saturation threshold
-  - Turns colored pixels black
-  - Applied to all slices or specified slice ranges
-- **Unified Modifications Table:**
-  - Single table listing all modifications (object removals, crops, non-grayscale removal)
-  - Editable slice ranges (min/max) for each modification
-  - Clear indication of modification type (Crop, Selection removal, etc.)
-  - All modifications applied during preprocessing
-- **Slice Reordering:**
-  - Automatic reordering by Z position (DICOM metadata)
-  - Reorder files in source folder with sequential naming
-  - Optional export prefix for sequential filenames
-- **Export Range Selection:**
-  - Export all slices (default)
-  - Export specific slice range
-  - Min/max slice selection controls
-- **DICOM Support:**
-  - Full DICOM file compatibility (.dcm, .dicom)
-  - Preserves 16-bit intensity range (0-65535) vs standard 8-bit (0-255)
-  - Automatic intensity range adaptation for all controls
-  - DICOM metadata preservation during export
-- **Batch processing with detailed progress:**
-  - Phase-aware progress (Loading, Processing, Saving)
-  - Per-phase slice counters
-  - Elapsed time and time remaining
-  - Cancellable operations
-- Output clean, processed slices ready for meshing
+CT23D provides a three-tab graphical interface built with PySide6, covering the complete workflow from preprocessing to visualization.
+
+### Image Processing Tab
+
+The preprocessing tab handles raw CT slice preparation, including overlay removal, object selection, bed detection, and image transformation.
 
 ![Preprocessing Tools](./images/preprocessing_tools.png)
 *Preprocessing interface with comprehensive tools for image transformation, object selection, and parameter configuration*
@@ -69,45 +33,9 @@ The project is designed to be:
 ![Preprocessing Example](./images/preprocessing_example.png)
 *Preprocessing example showing automatic bed detection (red bounding box) and before/after comparison*
 
-### Meshing
-- Load processed slices into a 3D volume
-- **Tabbed Histogram Visualization:**
-  - **Aggregated Histogram:** Overall intensity distribution (Intensity vs. Pixel Count)
-    - Intensity 0 pixels filtered out for cleaner visualization
-    - Linear scale for accurate representation
-    - Vertical bin boundary lines with labels
-  - **Slice-by-Slice Heatmap:** 2D heatmap (Slice Number vs. Intensity)
-    - Intensity on horizontal axis, Slice Number on vertical axis
-    - Color represents pixel count (log scale for visualization)
-    - Vertical bin boundary lines aligned with intensity axis
-- **Interactive bin management:**
-  - **Auto-bin system:** Automatic intensity bin detection with configurable parameters
-    - Intensity range (min/max) that adapts to DICOM (uint16) vs standard (uint8) images
-    - Configurable number of bins
-    - Uniformity parameter (0-1): 1 for uniform bins, 0 for distribution-based (default: 0)
-    - Visualize checkbox to show/hide intensity range lines on graphs
-    - Draggable range lines on histogram and heatmap for real-time adjustment
-  - Add/delete bins (per-row delete buttons)
-  - Modify bin min/max values (integer intensity values, minimum 1)
-  - Draggable bin boundaries on histogram with real-time updates
-  - Continuous bins mode (automatically adjusts adjacent bins) - enabled by default
-  - Bin colors with preview
-  - Enable/disable individual bins
-  - Bin limits always start at intensity 1 minimum (0 is background/air)
-  - Intensity range highlighting on slice preview when visualized
-- **Slice preview:**
-  - Large preview with slice navigation
-  - Slice selector spinbox and slider for quick navigation
-  - Automatic loading when directory is selected
-  - Pixels colored according to assigned bins
-  - Grayscale display when no bins defined
-  - Intensity range highlighting when visualized
-  - Real-time updates when bin parameters change
-- Automatic histogram and heatmap computation when directory is selected
-- Automatic optimal bin detection from intensity distribution (3-12 bins based on data)
-- Fallback to 6 uniform bins if auto-detection unavailable
-- Per-bin 3D mesh generation
-- Supports multiple output meshes per dataset
+### Meshing Tab
+
+The meshing tab loads processed slices into a 3D volume, analyzes intensity distributions, manages intensity bins, and exports meshes in multiple formats.
 
 ![Meshing Tools](./images/meshing_tools.png)
 *Meshing interface with histogram visualization, intensity bin management, and slice preview tools*
@@ -115,148 +43,89 @@ The project is designed to be:
 ![Meshing Example](./images/meshing_example.png)
 *Meshing example showing intensity histogram analysis and slice preview with bin-colored pixels*
 
-### Export
-- **Format support:**
-  - **PLY (Polygon File Format)** ✓ - Fully implemented
-    - Per-vertex RGB colors
-    - Per-vertex alpha channel (opacity)
-    - Blender-compatible sRGB colors
-  - **STL (Stereolithography)** ✓ - Fully implemented
-    - Binary or ASCII format
-    - Geometry only (no colors/opacity support)
-    - Widely compatible with 3D software
-  - **NRRD (Nearly Raw Raster Data)** ✓ - Fully implemented
-    - Canonical volume format with spacing and metadata
-    - Gzip compression support
-    - Sidecar JSON for provenance and direction matrices
-    - Compatible with 3D Preview tab for visualization
-  - Other formats (OBJ, GLTF) - Planned for future
-- **Export options:**
-  - Single file (all bins combined) or multiple files (one per bin)
-  - Export with/without colors (PLY only)
-  - Export with/without opacity (PLY only)
-  - Custom filename prefix
-  - STL binary/ASCII format selection
-  - **NRRD export:**
-    - Automatic spacing from UI controls (Z, Y, X in mm)
-    - Provenance metadata (source directory, timestamps, app version)
-    - Intensity bin information preservation
-    - Automatic data type optimization (int16 or float32)
-- **Mesh Processing Options:**
-  - **Component Filtering:** Remove small disconnected components (optional)
-    - Configurable minimum component size
-    - Helps reduce noise in meshes
-  - **Gaussian Smoothing:** Smooth mesh surfaces (optional)
-    - Configurable smoothing strength (sigma)
-    - Creates smoother surfaces but may lose small details
-  - **Spacing:** Voxel spacing in mm (Z, Y, X) - configurable per axis
-    - Used for mesh generation and NRRD export
-    - Z height calculation display (number of slices × Z spacing)
-- **File Size Estimation:**
-  - Calculate approximate file size before export
-  - Shows total size in MB for all files
-  - Non-blocking calculation with progress indicator
-- **Progress tracking:**
-  - Phase-aware progress (Building masks, Extracting meshes, Saving files, Exporting NRRD)
-  - Detailed per-phase counters
-  - Elapsed time and time remaining
-  - File size-based progress for saving phase
-  - Cancellable operations with proper cleanup
+### 3D Preview Tab
 
-### 3D Preview (Tab 3)
+The 3D preview tab provides interactive mesh visualization for canonical volumes exported from the meshing workflow.
 
 ![3D Preview](./images/3D_Preview_example.png)
 *3D Preview tab with interactive mesh visualization, opacity controls, and mesh generation tools*
 
-- **Load Canonical Volume:**
-  - Load NRRD format volumes exported from the Meshing tab
-  - Displays file path next to load button
-  - Automatic volume metadata extraction and display
-  - Background mesh generation with progress tracking
-- **Volume Info Display:**
-  - Read-only display of volume properties:
-    - Shape (Z, Y, X dimensions)
-    - Data type (int16 or float32)
-    - Spacing (sx, sy, sz in mm)
-    - Intensity kind (HU, HU_float, or raw)
-    - Statistics: Min, Max, Mean intensity values
-  - Compact 2-column layout with reduced spacing
-  - All values are selectable for copy-paste
-- **Mesh Generation Controls:**
-  - **Source selection:** Intensity threshold or Label volume (future)
-  - **Intensity threshold:** Min/Max range selection on separate line (enabled after volume load)
-    - Minimum column width ensures proper value display
-  - **LOD (Level of Detail):** Preview (default), Standard, or High quality
-    - Preview mode for fast loading and smooth interaction
-    - Standard and High modes for detailed visualization
-  - **Smooth shading:** Toggle smooth surface rendering (default: off for better performance)
-  - **Show edges:** Toggle edge visualization (default: off)
-  - Compact 3-row layout: Source, Intensity threshold, and LOD/Shading/Edges
-- **3D Viewer (PyVista):**
-  - Interactive 3D mesh visualization with PyVistaQt
-  - **Advanced transparency rendering:**
-    - Depth peeling enabled for proper transparency handling
-    - Meshes sorted by opacity (most opaque first) for correct rendering
-    - Opaque meshes maintain their color at contact points with transparent meshes
-  - **Viewer controls:**
-    - Reset camera to default view
-    - Toggle axes display
-    - Change background color
-  - Real-time mesh rendering with optimized performance
-  - Thread-safe mesh updates during loading
-  - Incremental mesh addition to prevent UI freezing
-- **Mesh Visibility and Properties Panel:**
-  - **Unified control panel:** Single group box containing table, mesh generation, and apply button
-  - **Per-mesh controls:**
-    - **Visibility checkbox:** Show/hide individual meshes (default: visible)
-      - Changes apply immediately when toggled
-    - **Color display:** Visual representation of bin color
-    - **Intensity range:** Read-only display of min-max intensity values
-    - **Opacity controls:** 
-      - Spinbox (0-100%) with synchronized slider
-      - Bidirectional synchronization between spinbox and slider
-      - Changes tracked but not applied until "Apply Changes" is clicked
-  - **Apply Changes button:**
-    - Applies all pending changes when clicked:
-      - Opacity modifications for all modified meshes
-      - Visibility changes
-      - Mesh generation parameter changes (smooth shading, show edges)
-    - Progress dialog showing progress for each modified mesh
-    - Thread-safe updates with proper PyVista integration
-    - Button enabled only when changes are pending
-  - Large, scrollable table for multiple meshes
-  - Efficient layout with proper column sizing
-- **ML Operations (Placeholder):**
-  - Future functionality for organ mapping and ML-based operations
-  - Placeholder UI for model selection and settings
+---
 
-### GUI
-- Built with PySide6
-- Fully threaded execution (no UI freezing)
-- **Three main tabs:**
-  - **Image Processing:** Preprocessing and image transformation
-  - **Meshing:** Volume loading, histogram analysis, and mesh export
-  - **3D Preview:** 3D visualization and mesh manipulation
-- **Patient Info Display:**
-  - Patient Info box showing DICOM metadata (patient name, ID, birth date, sex, study info)
-  - Automatically updates when DICOM files are loaded
-  - Positioned at top right with logo
-  - Two-column layout for compact display
-- **Enhanced progress dialogs:**
-  - Phase-aware progress with per-phase counters
-  - "Complete" indicators for finished phases
-  - Independent timer (elapsed/remaining time)
-  - Progress bar resets for each phase
-  - Single unified progress dialog for volume loading and histogram computation
-  - Relevant phase information (Loading slices, Building volume, Computing histograms, etc.)
-- **Improved Tab Visibility:**
-  - Larger, bolder tabs for better visibility
-  - Clear separation between processing steps
-- **Application Branding:**
-  - Application icon (up to 1024px) for taskbar and window title
-  - Logo displayed in top right corner (140px height)
-- Default directory linking (preprocessing output → meshing input)
-- Responsive UI with proper event processing during long operations
+## Installation
+
+### Requirements
+
+- Python 3.10 or newer
+- Recommended: Conda (Anaconda or Miniconda) for environment management
+
+### Setup
+
+1. Create a conda environment (optional but recommended):
+
+```bash
+conda create -n ct23d-env python=3.10
+conda activate ct23d-env
+```
+
+2. Install CT23D in editable mode:
+
+```bash
+pip install -e .
+```
+
+This installs CT23D and its dependencies, including the numerical stack (NumPy, SciPy), imaging libraries (scikit-image, imageio, pydicom), meshing tools (trimesh), and GUI frameworks (PySide6, pyqtgraph, pyvistaqt).
+
+---
+
+## Quick Start
+
+### GUI Workflow (Primary Entry Point)
+
+Launch the GUI from the project root:
+
+```bash
+python scripts/run_ct23d_gui.py
+```
+
+**End-to-end workflow:**
+
+1. **Image Processing tab:** Load your DICOM directory, configure preprocessing operations (overlay removal, bed detection, cropping), and export processed slices
+2. **Meshing tab:** Load processed slices, analyze intensity distributions using the histogram tools, configure intensity bins, and export meshes (PLY, STL, or NRRD)
+3. **3D Preview tab:** Load exported NRRD volumes and generate interactive 3D visualizations with adjustable opacity and mesh properties
+
+The preprocessing output directory automatically links to the meshing input directory for seamless workflow transitions.
+
+**GUI status:**
+- Core functionality (preprocessing, meshing, export) is stable
+- Interactive features (slice previews, histogram tools) are functional
+- Live mesh previews and advanced visualization features continue to evolve
+
+### CLI Workflow
+
+The command-line interface is preferable for batch processing, reproducibility, and integration into automated pipelines.
+
+**Preprocessing CLI:**
+
+```bash
+python -m ct23d.cli.preprocess_cli --input-dir /path/to/dicom --processed-dir /path/to/output
+```
+
+**Meshing CLI:**
+
+```bash
+python -m ct23d.cli.mesh_cli --processed-dir /path/to/processed --output-dir /path/to/meshes --spacing 1.6 1.0 1.0
+```
+
+**YAML-based project configuration:**
+
+CT23D supports YAML configuration files for reproducible workflows. Configuration files use relative paths, enabling project portability across systems. Default configurations and presets (bone, soft tissue) are available in `src/ct23d/config/`.
+
+### Legacy Script
+
+The `CT_to_3D_legacy.py` script is maintained for backward compatibility. It provides a simplified interface that bypasses parts of the current project system, making it useful for quick one-off conversions or migration scenarios. This script is a compatibility wrapper around the core processing logic.
+
+**Note:** The legacy script is currently being refactored to use the new modular architecture. Once complete, it will call `ct23d.core.ct_compat.main()`.
 
 ---
 
@@ -264,287 +133,143 @@ The project is designed to be:
 
 ```
 CT23D/
-├── pyproject.toml
+├── pyproject.toml          # Project metadata and dependencies
 ├── README.md
 │
 ├── scripts/
-│   └── run_ct23d_gui.py
+│   ├── run_ct23d_gui.py    # GUI entry point
+│   ├── CT_to_3D_legacy.py  # Legacy compatibility wrapper
+│   └── view_nrrd.py        # NRRD viewer utility
 │
-└── src/
-    └── ct23d/
-        ├── core/
-        │   ├── images.py
-        │   ├── preprocessing.py
-        │   ├── volume.py
-        │   ├── bins.py
-        │   ├── meshing.py
-        │   ├── export.py
-        │   └── models.py
-        │
-        ├── gui/
-        │   ├── app.py
-        │   ├── main_window.py
-        │   ├── status.py
-        │   ├── workers.py
-        │   ├── view_nrrd_dialog.py
-        │   │
-        │   ├── preproc/
-        │   │   └── wizard.py
-        │   │
-        │   ├── mesher/
-        │   │   ├── wizard.py
-        │   │   ├── histogram_3d_view.py
-        │   │   ├── histogram_tabbed_view.py
-        │   │   └── slice_preview.py
-        │   │
-        │   └── processing3d/
-        │       └── wizard.py
-        │
-        └── cli/
-            ├── preprocess_cli.py
-            └── mesh_cli.py
+├── src/ct23d/
+│   ├── core/               # Pure processing logic (no UI dependencies)
+│   │   ├── images.py       # Image I/O and DICOM handling
+│   │   ├── preprocessing.py # Preprocessing operations
+│   │   ├── volume.py       # Volume construction
+│   │   ├── bins.py         # Intensity binning logic
+│   │   ├── meshing.py      # Mesh generation (marching cubes)
+│   │   ├── export.py       # Mesh export (PLY, STL, NRRD)
+│   │   ├── models.py       # Configuration dataclasses
+│   │   └── config_io.py    # YAML config loading/saving
+│   │
+│   ├── gui/                # PySide6 graphical interface
+│   │   ├── app.py          # Application entry point
+│   │   ├── main_window.py  # Main window and tab structure
+│   │   ├── workers.py      # Background thread workers
+│   │   ├── status.py       # Status and progress dialogs
+│   │   ├── preproc/        # Preprocessing tab components
+│   │   ├── mesher/         # Meshing tab components
+│   │   └── processing3d/   # 3D preview tab components
+│   │
+│   ├── cli/                # Command-line tools
+│   │   ├── preprocess_cli.py
+│   │   └── mesh_cli.py
+│   │
+│   └── config/             # Configuration system
+│       ├── defaults.yaml   # Default project configuration
+│       └── presets/        # Preset configurations (bone, soft tissue)
+│
+└── images/                 # README screenshots and examples
 ```
 
+**Design philosophy:**
+
+- **Core logic separation:** All processing algorithms live in `core/`, independent of GUI or CLI
+- **Testable architecture:** Pure functions and dataclasses enable unit testing without UI dependencies
+- **Modular components:** Each module has a clear responsibility (I/O, preprocessing, meshing, export)
 
 ---
 
-## Installation
+## Processing Pipeline
 
-### Requirements
-- Python 3.10 or newer
-- Conda recommended (Anaconda or Miniconda)
+The CT23D pipeline transforms raw CT data into exportable 3D meshes through the following stages:
 
-### Create environment
-conda create -n ct23d-env python=3.10
-conda activate ct23d-env
-
-### Install CT23D
-pip install -e .
-
-This installs CT23D in editable mode so source changes are reflected immediately.
+1. **DICOM loading:** Primary format with 16-bit intensity preservation (0-65535). PNG and JPEG are supported as fallback formats with 8-bit intensity ranges (0-255). Automatic intensity range adaptation throughout the UI.
+2. **Overlay and text removal:** Automatic detection and removal of scan annotations, overlays, and text artifacts that interfere with meshing.
+3. **Bed and headrest removal:** Automatic detection of scanning table artifacts with configurable aggressivity parameters.
+4. **Volume construction:** Processed slices are assembled into a 3D volumetric array with proper Z-ordering (automatic for DICOM via metadata, alphabetical for other formats).
+5. **Intensity binning:** Intensity distribution analysis enables definition of bins for tissue separation. Auto-bin system detects optimal bin boundaries, or bins can be manually configured.
+6. **Mask cleanup:** Optional component filtering removes small disconnected regions, and optional Gaussian smoothing reduces surface noise.
+7. **Marching cubes extraction:** Per-bin surface meshes are generated using the marching cubes algorithm with configurable voxel spacing.
+8. **Mesh export:** Meshes are exported in PLY (with colors and opacity), STL (geometry only), or NRRD (canonical volume format) with provenance metadata.
 
 ---
 
-## Running the GUI
+## Configuration System
 
-From the project root directory:
+CT23D uses YAML-based project configuration files for reproducible workflows.
 
-python scripts/run_ct23d_gui.py
+**Key features:**
 
----
+- **Relative paths:** All paths in configuration files are relative to the YAML file location, enabling project portability
+- **Defaults and presets:** Default configuration templates are provided, along with presets for common use cases (bone segmentation, soft tissue analysis)
+- **Validation:** Configuration files are validated against dataclass schemas to ensure correctness
+- **CLI integration:** The command-line tools can load project configurations, overriding individual parameters via command-line flags
 
-## Image Processing Workflow
+**Configuration structure:**
 
-1. Open the Image Processing tab
-2. Select an input directory containing raw CT slices
-3. Select an output directory for processed slices
-4. **Optional: Remove non-grayscale pixels** - Check the option and adjust threshold if needed
-5. **Optional: Select objects to remove:**
-   - Choose a tool mode (Box, Lasso, or Click to Select)
-   - Select objects in the preview image
-   - Assign labels to selected objects (optional)
-   - Objects will be removed from all slices during preprocessing
-6. **Optional: Auto-detect bed/headrest:**
-   - Click "Auto-Detect Bed/Headrest" (requires bed/headrest to be at the bottom)
-   - Adjust settings via the settings icon if needed
-7. **Optional: Rotate images:**
-   - Use rotation buttons (90° CW, 90° CCW, 180°)
-   - Preview shows rotation in "After preprocessing" view
-   - Rotation is applied during full preprocessing
-8. Adjust preprocessing parameters if needed
-9. Click "Run preprocessing"
+- `preprocess`: Input/output directories, caching, preprocessing parameters
+- `meshing`: Spacing, thresholds, binning parameters, export settings
+- `bins`: Custom intensity bin definitions (optional; auto-binning can be used instead)
 
-Processed slices are written to the selected output directory. The output directory will be automatically set as the default input for the meshing tab.
+Example presets are available in `src/ct23d/config/presets/` for reference.
 
 ---
 
-## Meshing Workflow
+## Outputs
 
-1. Open the Meshing tab
-2. **Select a directory containing processed slices:**
-   - The preprocessing output directory is automatically set as default
-   - Histogram and preview are automatically computed when a directory is selected
-   - You can still select a different directory if needed
-3. **Inspect the histogram:**
-   - **Aggregated Histogram tab:** Overall intensity distribution
-     - Intensity 0 pixels are filtered out
-     - Vertical bin boundary lines show bin limits
-   - **Slice-by-Slice Heatmap tab:** 2D heatmap view
-     - Intensity on horizontal axis, Slice Number on vertical axis
-     - Vertical bin boundary lines aligned with intensity
-4. **Manage intensity bins:**
-   - **Auto-bin system:** Use the Auto-bin section to automatically generate bins
-     - Set intensity range (min/max) - adapts to DICOM (uint16) vs standard (uint8) images
-     - Set number of bins and uniformity parameter (0-1)
-     - Click "Visualize" to show/hide intensity range lines on graphs
-     - Drag range lines on histogram and heatmap for real-time adjustment
-     - Click "Apply" to generate bins automatically
-   - Optimal bins are automatically detected from intensity distribution (3-12 bins)
-   - Add/delete bins as needed (use delete button in each row)
-   - Adjust bin min/max values (integers, minimum 1)
-   - Drag bin boundaries on the histogram for quick adjustment
-   - "Continuous bins" is enabled by default - automatically adjusts adjacent bins
-   - Assign colors to bins (double-click color cell)
-   - Enable/disable bins using checkboxes
-   - Intensity ranges automatically adapt for DICOM (uint16) vs standard images (uint8)
-5. **Preview slices:**
-   - Navigate through slices using the slice selector or slider
-   - Preview automatically loads when directory is selected
-   - Preview shows pixels colored according to their assigned bins
-   - Grayscale display when no bins are defined
-   - Intensity range highlighting when visualized
-   - Real-time updates when bin parameters change
-6. **Configure mesh processing options (optional):**
-   - Enable/disable component filtering (removes small disconnected components)
-   - Adjust minimum component size
-   - Enable/disable Gaussian smoothing
-   - Adjust smoothing strength (sigma)
-   - Set voxel spacing (Z, Y, X in mm) - used for mesh generation and NRRD export
-   - Z height calculation automatically updates (number of slices × Z spacing)
-7. **Configure export options:**
-   - Format: PLY, STL, or NRRD
-   - File organization: Single file (all bins combined) or Multiple files (one per bin)
-   - Export with colors: Enable/disable per-vertex RGB colors (PLY only)
-   - Export with opacity: Enable/disable per-vertex alpha channel (PLY only)
-   - STL format: Binary or ASCII
-   - **NRRD export:** Enable "Save canonical volume" checkbox
-     - Spacing values from UI are automatically applied
-     - Provenance metadata is included
-     - Can be loaded in 3D Preview tab for visualization
-   - Optional: Calculate approximate file size before export
-8. Select an output directory
-9. Set filename prefix (optional)
-10. Click "Export meshes" or "Export NRRD Volume"
+### Preprocessing Output
 
-Each enabled bin produces a separate mesh file (or all bins combined into one file, depending on your selection). Meshes include bin colors and optional opacity as configured. NRRD volumes can be loaded in the 3D Preview tab for interactive visualization.
-
-## 3D Preview Workflow
-
-1. Open the 3D Preview tab
-2. **Load a canonical volume:**
-   - Click "Load Canonical Volume..." button
-   - Select an NRRD file (exported from the Meshing tab)
-   - Volume metadata is automatically displayed in the Volume Info panel
-3. **View volume information:**
-   - Shape, data type, spacing, intensity kind
-   - Min, Max, Mean intensity statistics
-   - All values are selectable for copy-paste
-4. **Generate meshes:**
-   - **Source:** Select "Intensity threshold" (Label volume is planned for future)
-   - **Intensity threshold:** Set Min/Max values on separate line (enabled after volume load)
-   - **LOD:** Choose Preview (default for fast loading), Standard, or High quality
-   - **Smooth shading:** Toggle smooth surface rendering (default: off)
-   - **Show edges:** Toggle edge visualization (default: off)
-   - Click "Generate Mesh" button
-   - Meshes are generated in background and displayed incrementally in the 3D viewer
-   - No UI freezing during mesh generation
-5. **Control mesh visibility:**
-   - Use checkboxes in the "Visible" column to show/hide individual meshes
-   - Changes apply immediately when checkbox is toggled
-   - Hidden meshes are properly removed from the viewer
-6. **Adjust mesh properties:**
-   - **Opacity:** Use spinboxes (0-100%) or synchronized sliders for each mesh
-     - Spinbox and slider are bidirectionally synchronized
-     - Changes are tracked but not applied until "Apply Changes" is clicked
-   - **Smooth shading:** Toggle in Mesh Generation controls
-   - **Show edges:** Toggle in Mesh Generation controls
-   - All changes (opacity, visibility, mesh generation parameters) wait for "Apply Changes" button
-   - Click "Apply Changes" button to apply all pending modifications
-   - Progress dialog shows progress for each modified mesh
-   - Button is enabled only when changes are pending
-7. **3D Viewer controls:**
-   - **Reset Camera:** Return to default viewing angle
-   - **Toggle Axes:** Show/hide coordinate axes
-   - **Background Color:** Change viewer background color
-   - Interactive rotation, zoom, and pan with mouse
-   - Proper transparency rendering with depth peeling
-   - Opaque meshes maintain their appearance when touching transparent meshes
-
----
-
-## Output
-
-### Image Processing Output
-- Clean, processed slice images
-- Non-grayscale pixels removed (if enabled, from specified slice ranges)
-- Selected objects removed from all slices or specified slice ranges
-- Rotated images (if rotation was applied)
-- Cropped images (if crops were applied, preserving all pixels within crop area)
-- Black threshold pixels removed (if enabled, from specified slice ranges)
-- Only slices within export range are saved (if export range is specified)
+Processed slice images are written to the specified output directory with all modifications applied (overlay removal, rotations, crops, object removals). DICOM metadata is preserved when applicable.
 
 ### Meshing Output
-- **Formats:**
-  - **PLY (Polygon File Format):**
-    - Per-vertex RGB colors (if enabled) - sRGB-compatible for Blender
-    - Per-vertex alpha channel (if opacity enabled)
-    - Binary format
-  - **STL (Stereolithography):**
-    - Binary or ASCII format
-    - Geometry only (no colors/opacity)
-  - **NRRD (Nearly Raw Raster Data):**
-    - Canonical volume format with spacing metadata
-    - Gzip compression (default)
-    - Sidecar JSON file with provenance and direction matrices
-    - Filename format: `{prefix}_volume.nrrd` (or custom path)
-    - Compatible with 3D Preview tab for visualization
-- **File organization:**
-  - **Multiple files:** One file per enabled bin
-    - PLY filename format: `{prefix}_bin_{id:02d}_{low}_{high}.ply`
-    - STL filename format: `{prefix}_bin_{id:02d}_{low}_{high}.stl`
-    - Example: `ct_layer_bin_01_12_85.ply` or `ct_layer_bin_01_12_85.stl`
-  - **Single file:** All bins combined into one file
-    - PLY filename format: `{prefix}_combined.ply`
-    - STL filename format: `{prefix}_combined.stl`
-    - Example: `ct_layer_combined.ply` or `ct_layer_combined.stl`
-  - **NRRD:** Single volume file with all intensity data
-    - Includes spacing (Z, Y, X in mm) from UI settings
-    - Includes provenance metadata (source, timestamps, bins, etc.)
-- **Features:**
-  - Integer intensity values in filenames (for PLY/STL)
-  - Component filtering applied (if enabled)
-  - Gaussian smoothing applied (if enabled)
-  - Spacing metadata preserved in NRRD format
 
----
+**Supported formats:**
 
-## Design Principles
+- **PLY (Polygon File Format):** Binary format with per-vertex RGB colors and optional alpha channel (opacity). Colors are Blender-compatible sRGB.
+- **STL (Stereolithography):** Binary or ASCII format, geometry only (no colors). Widely compatible with CAD software.
+- **NRRD (Nearly Raw Raster Data):** Canonical volume format with spacing metadata, gzip compression, and sidecar JSON for provenance. Compatible with the 3D Preview tab.
 
-- Core logic is GUI-independent
-- GUI uses background threads for all heavy operations
-- Clear separation between:
-  - Image I/O
-  - Preprocessing
-  - Volume construction
-  - Histogram analysis
-  - Mesh generation
-- Legacy compatibility preserved through wrappers when required
+**File organization:**
 
----
+- **Multiple files mode:** One mesh file per enabled intensity bin
+  - Format: `{prefix}_bin_{id:02d}_{min_intensity}_{max_intensity}.{ext}`
+  - Example: `ct_layer_bin_01_12_85.ply`
+- **Single file mode:** All bins combined into one mesh file
+  - Format: `{prefix}_combined.{ext}`
+  - Example: `ct_layer_combined.ply`
 
-## Development Notes
+**NRRD volume export:**
 
-- GUI workers are QThread-based
-- Progress updates are phase-aware with per-phase counters
-- Histogram visualization is handled via PyQtGraph (3D heatmap)
-- All pixels (including zeros) are included in histogram for accurate slice representation
-- Bin boundaries are draggable on the histogram with real-time table updates
-- Object selection uses connected component analysis with configurable tolerance
-- Mask propagation applies selected objects to all slices at the same coordinates
-- Export supports per-vertex colors and opacity in PLY format
+- Includes voxel spacing metadata (Z, Y, X in mm) from UI settings
+- Includes provenance metadata (source directory, timestamps, application version, bin information)
+- Automatic data type optimization (int16 or float32 based on intensity range)
 
 ---
 
 ## Roadmap
 
-- Additional mesh export formats (OBJ, GLTF/GLB, FBX)
-- Preset-based workflows (bone, soft tissue, etc.)
-- Volume preview (orthogonal slice views) in 3D Preview tab
-- Label volume support for mesh generation in 3D Preview tab
-- ML-based organ mapping and segmentation in 3D Preview tab
-- Batch and headless processing
-- Extended documentation and examples
-- Advanced mask propagation algorithms
+CT23D development priorities include:
+
+- **GUI refinements:** Enhanced live slice previews, real-time mesh preview during export, improved histogram interaction
+- **Export formats:** Additional formats (OBJ, GLTF/GLB, FBX) for broader software compatibility
+- **DICOM tooling:** Deeper DICOM metadata utilization, window/level presets, modality-specific optimizations
+- **Advanced features:** Label volume support in 3D Preview, ML-based organ mapping and segmentation, orthogonal slice views
+- **Distribution:** Application packaging for easier deployment (PyInstaller, briefcase)
+
+This roadmap reflects ongoing development priorities and may evolve based on user feedback and requirements.
+
+---
+
+## Contributing
+
+CT23D is designed with clear separation between core processing logic and user interfaces. This architecture enables:
+
+- **Testable code:** Core functions operate on NumPy arrays and dataclasses, facilitating unit tests without GUI dependencies
+- **Reusable components:** Processing modules can be integrated into other workflows or scripts
+- **Maintainable structure:** UI changes do not affect core algorithms, and core improvements benefit all interfaces
+
+Contributions are welcome. Please open issues for bug reports, feature requests, or questions. Pull requests should maintain the separation of concerns and include appropriate tests for core functionality.
 
 ---
 
