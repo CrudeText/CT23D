@@ -73,6 +73,7 @@ class Processing3DWizard(QWidget):
         self._mesh_original_opacities: list[int] = []  # Store original opacity values to track changes
         self._mesh_display_timer: Optional[QTimer] = None  # Timer for incremental mesh display
         self._pending_meshes: list[tuple[int, IntensityBin, pv.PolyData]] = []  # Meshes waiting to be displayed
+        self._original_lod_index: int = 1  # Store original LOD index (default Standard)
         
         self._build_ui()
     
@@ -311,8 +312,8 @@ class Processing3DWizard(QWidget):
         # Row 2: LOD, Smooth shading, and Show edges on same line
         mesh_layout.addWidget(QLabel("LOD:"), 2, 0)
         self.lod_combo = QComboBox()
-        self.lod_combo.addItems(["Preview", "Standard", "High"])
-        self.lod_combo.setCurrentIndex(0)  # Default to Preview for better performance
+        self.lod_combo.addItems(["Preview", "Standard", "High", "No LOD Loss"])
+        self.lod_combo.setCurrentIndex(1)  # Default to Standard
         self.lod_combo.currentIndexChanged.connect(self._on_mesh_param_changed)
         mesh_layout.addWidget(self.lod_combo, 2, 1)
         
@@ -382,15 +383,17 @@ class Processing3DWizard(QWidget):
         Get step_size for marching_cubes based on LOD setting.
         
         Returns:
-            step_size: 1 for High, 2 for Standard, 4 for Preview
+            step_size: 1 for High/No LOD Loss, 2 for Standard, 4 for Preview
         """
         lod_text = self.lod_combo.currentText()
         if lod_text == "Preview":
             return 4  # 4x downsampling = 16x fewer vertices
         elif lod_text == "Standard":
             return 2  # 2x downsampling = 4x fewer vertices
-        else:  # High
+        elif lod_text == "High":
             return 1  # Full resolution
+        else:  # "No LOD Loss"
+            return 1  # Full resolution (no downsampling)
     
     # ------------------------------------------------------------------ #
     # Load volume
@@ -597,6 +600,9 @@ class Processing3DWizard(QWidget):
             
             # Store meshes with bin information
             self._current_meshes = meshes
+            
+            # Store original LOD index when meshes are loaded
+            self._original_lod_index = self.lod_combo.currentIndex()
             
             # Display meshes
             if meshes:
@@ -958,6 +964,10 @@ class Processing3DWizard(QWidget):
                         enabled=True
                     )
                     self._current_meshes = [(fallback_bin, result)]
+                    
+                    # Store original LOD index when mesh is manually generated
+                    self._original_lod_index = self.lod_combo.currentIndex()
+                    
                     self._display_meshes(self._current_meshes)
                     # Show warning if mask was large
                     if worker.warning_message:
@@ -1090,10 +1100,8 @@ class Processing3DWizard(QWidget):
             # Store checkbox reference
             self._mesh_visibility_checkboxes.append(visible_item)
         
-        # Process events after table population
-        QApplication.processEvents()
-        
         # Now add meshes to viewer incrementally using a timer
+        # Table population is fast, no need to process events here
         # This prevents UI freezing
         self._pending_meshes = [(row, bin_, mesh) for row, (bin_, mesh) in enumerate(meshes) if mesh.n_points > 0]
         
@@ -1123,6 +1131,32 @@ class Processing3DWizard(QWidget):
         
         # Camera reset and final render will happen after all meshes are added
     
+    def _finalize_mesh_display(self) -> None:
+        """Finalize mesh display after all meshes are added (called asynchronously)."""
+        if self._viewer is None:
+            return
+        
+        # Re-enable rendering
+        try:
+            render_window = self._viewer.renderer.GetRenderWindow()
+            render_window.SetAbortRender(False)
+            render_window.SetDesiredUpdateRate(10)
+        except Exception:
+            pass
+        
+        # Reset camera to fit all meshes
+        if self._mesh_actors and self._current_meshes:
+            all_bounds = [mesh.bounds for _, mesh in self._current_meshes if mesh.n_points > 0]
+            if all_bounds:
+                min_bounds = [min(b[i] for b in all_bounds) for i in range(0, 6, 2)]
+                max_bounds = [max(b[i] for b in all_bounds) for i in range(1, 6, 2)]
+                combined_bounds = [min_bounds[0], max_bounds[0], min_bounds[1], max_bounds[1], min_bounds[2], max_bounds[2]]
+                self._viewer.reset_camera(bounds=combined_bounds)
+        
+        # Final render (only once at the end)
+        self._viewer.render()
+        self._viewer.update()
+    
     def _add_next_mesh_to_viewer(self) -> None:
         """Add the next pending mesh to the viewer (called by timer)."""
         if not self._pending_meshes or self._viewer is None:
@@ -1139,21 +1173,10 @@ class Processing3DWizard(QWidget):
                 except Exception:
                     pass
             
-            # Reset camera to fit all meshes
+            # Reset camera to fit all meshes (use QTimer to avoid blocking)
             if self._mesh_actors and self._viewer is not None:
-                QApplication.processEvents()
-                all_bounds = [mesh.bounds for _, mesh in self._current_meshes if mesh.n_points > 0]
-                if all_bounds:
-                    min_bounds = [min(b[i] for b in all_bounds) for i in range(0, 6, 2)]
-                    max_bounds = [max(b[i] for b in all_bounds) for i in range(1, 6, 2)]
-                    combined_bounds = [min_bounds[0], max_bounds[0], min_bounds[1], max_bounds[1], min_bounds[2], max_bounds[2]]
-                    self._viewer.reset_camera(bounds=combined_bounds)
-            
-            # Final render (only once at the end)
-            if self._viewer is not None:
-                QApplication.processEvents()
-                self._viewer.render()
-                self._viewer.update()
+                # Use singleShot timer to defer camera reset and render to avoid blocking
+                QTimer.singleShot(0, lambda: self._finalize_mesh_display())
             return
         
         # Get next mesh to add
@@ -1262,8 +1285,7 @@ class Processing3DWizard(QWidget):
         self._mesh_actors[row] = actor
         
         # Don't render here - rendering is disabled during batch addition
-        # Just process events to keep UI responsive
-        QApplication.processEvents()
+        # Timer already allows event loop to process events between calls
     
     def _clear_meshes(self) -> None:
         """Clear all meshes from the viewer and table."""
@@ -1570,8 +1592,10 @@ class Processing3DWizard(QWidget):
                         has_changes = True
                         break
         
-        # Mesh generation parameter changes always enable the button
-        # (we assume any change to these requires regeneration)
+        # Check LOD changes
+        if not has_changes:
+            if self.lod_combo.currentIndex() != self._original_lod_index:
+                has_changes = True
         
         self.btn_apply_changes.setEnabled(has_changes)
     
@@ -1579,16 +1603,173 @@ class Processing3DWizard(QWidget):
         """Track opacity value changes (but don't apply immediately)."""
         self._check_and_enable_apply_button()
     
+    def _regenerate_meshes_for_lod(self) -> None:
+        """Regenerate meshes from volume with current LOD setting."""
+        if self._canonical_volume is None:
+            return
+        
+        from PySide6.QtCore import Signal
+        volume = self._canonical_volume
+        
+        # Create a worker to regenerate meshes from volume bins
+        class RegenerateMeshWorker(WorkerBase):
+            phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
+            
+            def __init__(self, volume: CanonicalVolume, step_size: int):
+                super().__init__()
+                self.volume = volume
+                self.step_size = step_size
+                self.meshes: list[tuple[IntensityBin, pv.PolyData]] = []
+            
+            def run(self) -> None:  # type: ignore[override]
+                try:
+                    # Parse bins from provenance
+                    bins: list[IntensityBin] = []
+                    if self.volume.provenance:
+                        intensity_bins_data = self.volume.provenance.get("intensity_bins")
+                        if intensity_bins_data and isinstance(intensity_bins_data, list):
+                            for idx, bin_data in enumerate(intensity_bins_data):
+                                if isinstance(bin_data, dict):
+                                    color_val = bin_data.get("color")
+                                    color_tuple = None
+                                    if color_val and isinstance(color_val, (list, tuple)) and len(color_val) >= 3:
+                                        # Normalize color to 0-1 range if needed
+                                        r, g, b = color_val[0], color_val[1], color_val[2]
+                                        if r > 1.0 or g > 1.0 or b > 1.0:
+                                            r, g, b = r / 255.0, g / 255.0, b / 255.0
+                                        color_tuple = (float(r), float(g), float(b))
+                                    
+                                    bins.append(IntensityBin(
+                                        index=bin_data.get("index", idx),
+                                        low=bin_data.get("low", 0),
+                                        high=bin_data.get("high", 255),
+                                        name=bin_data.get("name", f"bin_{idx:02d}"),
+                                        color=color_tuple,
+                                        enabled=bin_data.get("enabled", True),
+                                    ))
+                    
+                    if not bins:
+                        # No bins - cannot regenerate (should not happen)
+                        self.finished.emit([])
+                        return
+                    
+                    # Filter to enabled bins only
+                    enabled_bins = [b for b in bins if b.enabled]
+                    total = len(enabled_bins)
+                    
+                    if total == 0:
+                        self.finished.emit([])
+                        return
+                    
+                    # Build masks for each bin
+                    self.phase_progress.emit("Building masks", 0, total, total)
+                    bin_masks = []
+                    vol = self.volume.data
+                    for i, bin_ in enumerate(enabled_bins):
+                        self.phase_progress.emit("Building masks", i + 1, total, total * 2)
+                        bin_mask = binsmod.build_bin_mask(vol, bin_)
+                        bin_masks.append(bin_mask)
+                    
+                    # Extract meshes for each bin
+                    self.phase_progress.emit("Extracting meshes", 0, total, total * 2)
+                    from skimage import measure
+                    sx, sy, sz = self.volume.spacing
+                    spacing_for_marching = (sz, sy, sx)
+                    
+                    for i, (bin_, bin_mask) in enumerate(zip(enabled_bins, bin_masks)):
+                        self.phase_progress.emit("Extracting meshes", i + 1, total, total * 2)
+                        
+                        if np.count_nonzero(bin_mask) == 0:
+                            continue
+                        
+                        mask_float = bin_mask.astype(np.float32)
+                        verts_physical, faces, _normals, _values = measure.marching_cubes(
+                            mask_float,
+                            level=0.5,
+                            spacing=spacing_for_marching,
+                            step_size=self.step_size,
+                        )
+                        
+                        if len(faces) == 0:
+                            continue
+                        
+                        # Convert vertices from (z, y, x) array order to (x, y, z) physical space
+                        verts = np.column_stack([
+                            verts_physical[:, 2],
+                            verts_physical[:, 1],
+                            verts_physical[:, 0],
+                        ])
+                        
+                        # Convert to PyVista PolyData
+                        n_faces = len(faces)
+                        faces_vtk = np.empty((n_faces, 4), dtype=np.int32)
+                        faces_vtk[:, 0] = 3
+                        faces_vtk[:, 1:] = faces
+                        mesh = pv.PolyData(verts, faces_vtk.flatten())
+                        mesh = mesh.compute_normals()
+                        
+                        # Apply bin color to all vertices
+                        if bin_.color is not None:
+                            r, g, b = bin_.color
+                            r_int = int(r * 255)
+                            g_int = int(g * 255)
+                            b_int = int(b * 255)
+                            n_verts = mesh.n_points
+                            vertex_colors = np.full((n_verts, 3), [r_int, g_int, b_int], dtype=np.uint8)
+                            mesh['colors'] = vertex_colors
+                        
+                        self.meshes.append((bin_, mesh))
+                    
+                    self.finished.emit(self.meshes)
+                    
+                except Exception as e:
+                    self.error.emit(str(e))
+        
+        # Get current step_size from LOD setting
+        step_size = self._get_lod_step_size()
+        worker = RegenerateMeshWorker(volume, step_size)
+        
+        def on_success(meshes: list) -> None:
+            if meshes:
+                self._current_meshes = meshes
+                self._display_meshes(meshes)
+                # Update original LOD index after successful regeneration
+                self._original_lod_index = self.lod_combo.currentIndex()
+                # Update original opacities to current values (will be 100 after regeneration)
+                for i in range(len(self._mesh_opacity_spinboxes)):
+                    if i < len(self._mesh_original_opacities):
+                        self._mesh_original_opacities[i] = self._mesh_opacity_spinboxes[i].value()
+                # Disable Apply Changes button
+                self.btn_apply_changes.setEnabled(False)
+                self.status.show_message(f"Meshes regenerated with new LOD setting", timeout_ms=2000)
+            else:
+                self.status.show_error("Mesh regeneration produced no meshes.")
+        
+        def on_error(error_msg: str) -> None:
+            self.status.show_error(f"Failed to regenerate meshes: {error_msg}")
+        
+        self.status.run_threaded_with_progress(
+            worker,
+            "Regenerating meshes with new LOD...",
+            on_success=on_success,
+        )
+        worker.error.connect(on_error)
+    
     def _on_apply_changes_clicked(self) -> None:
         """Apply all pending changes: opacity, visibility, and mesh generation parameters."""
         if self._viewer is None or not self._current_meshes:
             return
         
-        # Check if mesh generation parameters changed (need to regenerate meshes)
-        # For now, we'll just refresh the display with current parameters
-        # TODO: In future, if threshold/LOD changed, regenerate meshes
+        # Check if LOD changed (need to regenerate meshes)
+        lod_changed = self.lod_combo.currentIndex() != self._original_lod_index
         
-        # Apply all changes by refreshing all meshes with current settings
+        if lod_changed and self._canonical_volume is not None:
+            # LOD changed - regenerate meshes from volume (async operation)
+            # Updates to original LOD index and opacities will happen in on_success callback
+            self._regenerate_meshes_for_lod()
+            return  # Exit early - updates happen in callback
+        
+        # LOD unchanged - just refresh display with current settings
         # This handles opacity, visibility, smooth shading, and show edges
         self._refresh_all_meshes()
         
@@ -1597,172 +1778,11 @@ class Processing3DWizard(QWidget):
             if i < len(self._mesh_original_opacities):
                 self._mesh_original_opacities[i] = self._mesh_opacity_spinboxes[i].value()
         
+        # Update original LOD index (shouldn't have changed, but update anyway)
+        self._original_lod_index = self.lod_combo.currentIndex()
+        
         # Disable Apply Changes button
         self.btn_apply_changes.setEnabled(False)
-        
-        # OLD CODE BELOW - keeping for reference but using simpler approach above
-        if False:
-            # Find which meshes have been modified
-            modified_rows = []
-            for i in range(len(self._mesh_opacity_spinboxes)):
-                if i < len(self._mesh_original_opacities):
-                    current_value = self._mesh_opacity_spinboxes[i].value()
-                    original_value = self._mesh_original_opacities[i]
-                    if current_value != original_value:
-                        modified_rows.append(i)
-            
-            if not modified_rows:
-                self.btn_apply_changes.setEnabled(False)
-                return
-        
-        # Create a worker that emits progress signals, but actual mesh updates happen on main thread
-        class ApplyOpacityChangesWorker(WorkerBase):
-            phase_progress = Signal(str, int, int, int)  # phase, current, phase_total, overall_total
-            apply_mesh = Signal(int)  # Signal to apply changes for a specific mesh row
-            
-            def __init__(self, modified_rows: list[int]):
-                super().__init__()
-                self.modified_rows = modified_rows
-            
-            def run(self) -> None:  # type: ignore[override]
-                try:
-                    total = len(self.modified_rows)
-                    for idx, row in enumerate(self.modified_rows):
-                        # Emit progress with mesh number information
-                        self.phase_progress.emit(f"Applying opacity changes (mesh {idx + 1}/{total})", idx + 1, total, total)
-                        # Emit signal to apply this mesh (will be handled on main thread)
-                        self.apply_mesh.emit(row)
-                        # Small delay to allow UI to update
-                        self.msleep(10)
-                    
-                    self.finished.emit(None)
-                except Exception as e:
-                    self.error.emit(str(e))
-        
-        worker = ApplyOpacityChangesWorker(modified_rows)
-        
-        # Connect signal to apply mesh changes on main thread
-        def apply_single_mesh(row: int) -> None:
-            """Apply opacity change for a single mesh (called on main thread)."""
-            if row >= len(self._current_meshes) or row >= len(self._mesh_opacity_spinboxes):
-                return
-            
-            # Get new opacity value
-            opacity_value = self._mesh_opacity_spinboxes[row].value()
-            opacity = opacity_value / 100.0
-            
-            # Check if mesh is visible
-            is_visible = True
-            if row < len(self._mesh_visibility_checkboxes):
-                is_visible = self._mesh_visibility_checkboxes[row].checkState() == Qt.Checked
-            
-            if not is_visible:
-                # Just update the stored value, don't update actor
-                if row < len(self._mesh_original_opacities):
-                    self._mesh_original_opacities[row] = opacity_value
-                return
-            
-            bin_, mesh = self._current_meshes[row]
-            
-            # Check if actor already exists
-            if row < len(self._mesh_actors) and self._mesh_actors[row] is not None:
-                # Update existing actor's opacity directly (faster and more reliable)
-                actor = self._mesh_actors[row]
-                actor_property = actor.GetProperty()
-                if actor_property is not None:
-                    actor_property.SetOpacity(opacity)
-                    # Force render to update the display
-                    self._viewer.render()
-                    self._viewer.update()
-            else:
-                # Actor doesn't exist, need to create it
-                smooth_shading = self.smooth_shading_cb.isChecked()
-                show_edges = self.show_edges_cb.isChecked()
-                
-                if 'colors' in mesh.point_data:
-                    actor = self._viewer.add_mesh(
-                        mesh,
-                        scalars='colors',
-                        rgb=True,
-                        opacity=opacity,
-                        smooth_shading=smooth_shading,
-                        show_edges=show_edges,
-                    )
-                elif bin_.color is not None:
-                    r, g, b = bin_.color
-                    actor = self._viewer.add_mesh(
-                        mesh,
-                        color=(r, g, b),
-                        opacity=opacity,
-                        smooth_shading=smooth_shading,
-                        show_edges=show_edges,
-                    )
-                else:
-                    actor = self._viewer.add_mesh(
-                        mesh,
-                        color='white',
-                        opacity=opacity,
-                        smooth_shading=smooth_shading,
-                        show_edges=show_edges,
-                    )
-                
-                # Ensure we have enough actors in the list
-                while len(self._mesh_actors) <= row:
-                    self._mesh_actors.append(None)
-                self._mesh_actors[row] = actor
-                
-                # Force render to update the display
-                self._viewer.render()
-                self._viewer.update()
-            
-            # Update original opacity
-            if row < len(self._mesh_original_opacities):
-                self._mesh_original_opacities[row] = opacity_value
-            
-            # Process events to keep UI responsive
-            QApplication.processEvents()
-        
-        # Connect all signals BEFORE starting the worker to avoid "Signal source has been deleted" errors
-        worker.apply_mesh.connect(apply_single_mesh)
-        
-        def on_success(_result: object) -> None:
-            # Update all original opacities to current values (in case any were missed)
-            for i in range(len(self._mesh_opacity_spinboxes)):
-                if i < len(self._mesh_original_opacities):
-                    self._mesh_original_opacities[i] = self._mesh_opacity_spinboxes[i].value()
-            
-            # Disable Apply Changes button
-            self.btn_apply_changes.setEnabled(False)
-            
-            # Final render
-            if self._viewer is not None:
-                self._viewer.render()
-                self._viewer.update()
-            
-            # Clear worker reference
-            if self._opacity_worker == worker:
-                self._opacity_worker = None
-            
-            self.status.show_message(f"Applied opacity changes to {len(modified_rows)} mesh(es)", timeout_ms=2000)
-        
-        def on_error(error_msg: str) -> None:
-            self.status.show_error(f"Failed to apply changes: {error_msg}")
-            # Clear worker reference on error
-            if self._opacity_worker == worker:
-                self._opacity_worker = None
-        
-        # Connect error signal BEFORE starting the worker
-        worker.error.connect(on_error)
-        
-        # Store reference to prevent garbage collection
-        self._opacity_worker = worker
-        
-        # Now start the worker
-        self.status.run_threaded_with_progress(
-            worker,
-            "Applying opacity changes...",
-            on_success=on_success,
-        )
     
     def _on_mesh_param_changed(self) -> None:
         """Track changes to mesh generation parameters (don't render immediately)."""
